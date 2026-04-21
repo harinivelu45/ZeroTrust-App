@@ -1,0 +1,2570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sovereign Command Platform</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18?dev",
+      "react-dom/client": "https://esm.sh/react-dom@18/client?dev",
+      "recharts": "https://esm.sh/recharts@2.12.7?dev",
+      "socket.io-client": "https://esm.sh/socket.io-client@4.7.2?dev"
+    }
+  }
+  </script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body, html { margin: 0; padding: 0; height: 100vh; overflow: hidden; background: #070B1A; }
+    #root { height: 100vh; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    import React from 'react';
+    import { createRoot } from 'react-dom/client';
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import {
+  RadarChart, Radar, PolarGrid, PolarAngleAxis, PolarRadiusAxis,
+  LineChart, Line, AreaChart, Area, BarChart, Bar,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, Cell, PieChart, Pie
+} from "recharts";
+import { io } from "socket.io-client";
+
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+const NAVY = "#1E2761";
+const GOLD = "#C9A84C";
+const CYAN = "#00D4FF";
+const RED = "#FF3B3B";
+const GREEN = "#00FF88";
+const ORANGE = "#FF8C00";
+
+const CITIES = [
+  { city: "Mumbai", country: "India", lat: 19.076, lng: 72.877 },
+  { city: "Delhi", country: "India", lat: 28.704, lng: 77.102 },
+  { city: "Bangalore", country: "India", lat: 12.972, lng: 77.594 },
+  { city: "Hyderabad", country: "India", lat: 17.385, lng: 78.486 },
+  { city: "Chennai", country: "India", lat: 13.082, lng: 80.270 },
+  { city: "New York", country: "USA", lat: 40.713, lng: -74.006 },
+  { city: "London", country: "UK", lat: 51.507, lng: -0.128 },
+  { city: "Tokyo", country: "Japan", lat: 35.690, lng: 139.692 },
+  { city: "Singapore", country: "Singapore", lat: 1.352, lng: 103.820 },
+  { city: "Dubai", country: "UAE", lat: 25.204, lng: 55.271 },
+  { city: "Sydney", country: "Australia", lat: -33.869, lng: 151.209 },
+  { city: "Berlin", country: "Germany", lat: 52.520, lng: 13.405 },
+  { city: "Toronto", country: "Canada", lat: 43.651, lng: -79.347 },
+  { city: "São Paulo", country: "Brazil", lat: -23.550, lng: -46.633 },
+  { city: "Paris", country: "France", lat: 48.857, lng: 2.347 },
+];
+
+const DEVICE_TYPES = ["sensor", "gateway", "camera", "controller", "medical", "industrial"];
+const ISSUERS = ["ZeroTrust-CA", "EdgeSec-Authority", "CloudPKI-Root", "IoT-TrustAnchor"];
+const THREAT_TYPES = ["MITM", "DeviceSpoofing", "DDoS", "UnauthorizedAccess", "DataExfiltration", "BruteForce"];
+const SEVERITIES = ["Low", "Medium", "High", "Critical"];
+const STATUSES = ["Verified","Verified","Verified","Verified","Verified","Suspicious","Blocked","Isolated"];
+
+// Generate 500 realistic fake edge devices across global cities
+function generateFakeDevices() {
+  const devs = [];
+  for (let i = 0; i < 500; i++) {
+    const city = CITIES[i % CITIES.length];
+    const type = DEVICE_TYPES[i % DEVICE_TYPES.length];
+    const issuer = ISSUERS[i % ISSUERS.length];
+    const status = STATUSES[Math.floor(Math.random() * STATUSES.length)];
+    const trustScore = status === "Verified" ? Math.floor(Math.random()*20+80)
+      : status === "Suspicious" ? Math.floor(Math.random()*30+40)
+      : status === "Blocked" ? Math.floor(Math.random()*20+10)
+      : Math.floor(Math.random()*15);
+    const latJitter = (Math.random()-0.5)*6;
+    const lngJitter = (Math.random()-0.5)*6;
+    const padNum = String(i+1).padStart(5,"0");
+    const tag = city.city.substring(0,3).toUpperCase();
+    devs.push({
+      id: `DEV-${tag}-${padNum}`,
+      deviceId: `DEV-${tag}-${padNum}`,
+      name: `${type.toUpperCase()}-NODE-${padNum}`,
+      type, status, trustScore,
+      anomalyScore: (Math.random()*0.6).toFixed(2),
+      aiConfidence: `${(85+Math.random()*14).toFixed(1)}%`,
+      location: { city: city.city, country: city.country, lat: city.lat+latJitter, lng: city.lng+lngJitter },
+      certificate: { issuer, valid: status !== "Blocked", expiry: new Date(Date.now()+Math.random()*365*86400000).toISOString().split("T")[0] },
+      lastSeen: new Date(Date.now()-Math.random()*600000).toISOString(),
+      registeredAt: new Date(Date.now()-Math.random()*30*86400000).toISOString()
+    });
+  }
+  return devs;
+}
+
+// ─── DATA ENGINE ─────────────────────────────────────────────────────────────
+const BACKEND_URL = "http://localhost:5000";
+const socket = io(BACKEND_URL, { autoConnect: false });
+
+function generateThreat(devices) {
+  if (!devices || devices.length === 0) return null;
+  const type = THREAT_TYPES[Math.floor(Math.random() * THREAT_TYPES.length)];
+  const sev = Math.random() < 0.1 ? "Critical" : Math.random() < 0.25 ? "High" : Math.random() < 0.5 ? "Medium" : "Low";
+  const src = devices[Math.floor(Math.random() * devices.length)];
+  const msgs = {
+    MITM: "Man-in-the-Middle attack intercepting TLS 1.3 handshake at gateway",
+    DeviceSpoofing: "X.509 certificate replay attack — unauthorized device impersonation",
+    DDoS: `Volumetric DDoS: ${(Math.random() * 3 + 1).toFixed(1)}M packets/sec at cloud ingress`,
+    UnauthorizedAccess: `Brute-force: ${Math.floor(Math.random() * 5000 + 1000)} failed auth attempts`,
+    DataExfiltration: "Anomalous outbound transfer detected via encrypted covert channel",
+    BruteForce: "Credential stuffing attack on device management portal"
+  };
+  return {
+    id: `THR-${Date.now().toString(36).toUpperCase()}`,
+    type, severity: sev,
+    sourceDevice: src?.id || src?.deviceId || "UNKNOWN",
+    description: msgs[type],
+    timestamp: new Date().toISOString(),
+    status: "Mitigated",
+    response: sev === "Critical" ? "ISOLATED + KEY_ROTATED + MFA_TRIGGERED" :
+      sev === "High" ? "ACCESS_RESTRICTED + TRUST_REDUCED" :
+        sev === "Medium" ? "MONITORING_ENHANCED" : "LOGGED",
+    cvss: (Math.random() * 4 + 5).toFixed(1)
+  };
+}
+
+// ─── STYLES ──────────────────────────────────────────────────────────────────
+const css = `
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@400;700;900&family=Inter:wght@300;400;500;600&display=swap');
+  
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  :root {
+    --navy: #1E2761;
+    --navy2: #141B4D;
+    --navy3: #0D1235;
+    --gold: #C9A84C;
+    --gold2: #E8C56A;
+    --cyan: #00D4FF;
+    --red: #FF3B3B;
+    --green: #00FF88;
+    --orange: #FF8C00;
+    --white: #E8EDF5;
+    --dim: #7A8BA8;
+  }
+
+  body { background: #070B1A; color: var(--white); font-family: 'Inter', sans-serif; overflow: hidden; }
+  
+  .app { display: flex; height: 100vh; overflow: hidden; }
+  
+  /* Sidebar */
+  .sidebar {
+    width: 72px; background: linear-gradient(180deg, #0D1235 0%, #070B1A 100%);
+    border-right: 1px solid rgba(201,168,76,0.15);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 16px 0; gap: 8px; z-index: 100; flex-shrink: 0;
+  }
+  .logo-mark {
+    width: 44px; height: 44px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--gold), #8B6914);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Orbitron', monospace; font-weight: 900; font-size: 18px;
+    color: #070B1A; margin-bottom: 16px; flex-shrink: 0;
+    box-shadow: 0 0 20px rgba(201,168,76,0.4);
+  }
+  .nav-btn {
+    width: 48px; height: 48px; border-radius: 12px; border: none;
+    background: transparent; color: var(--dim); cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; transition: all 0.2s; font-size: 20px; position: relative;
+  }
+  .nav-btn:hover { background: rgba(201,168,76,0.1); color: var(--gold); }
+  .nav-btn.active { background: rgba(201,168,76,0.15); color: var(--gold); box-shadow: inset 0 0 0 1px rgba(201,168,76,0.3); }
+  .nav-btn span { font-size: 8px; font-family: 'Orbitron', monospace; letter-spacing: 0.5px; }
+  .nav-sep { width: 32px; height: 1px; background: rgba(201,168,76,0.1); margin: 4px 0; }
+
+  /* Main */
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  
+  /* Topbar */
+  .topbar {
+    height: 52px; background: linear-gradient(90deg, #0D1235 0%, #141B4D 100%);
+    border-bottom: 1px solid rgba(201,168,76,0.15);
+    display: flex; align-items: center; padding: 0 20px; gap: 16px; flex-shrink: 0;
+  }
+  .topbar-title { font-family: 'Orbitron', monospace; font-size: 13px; font-weight: 700; color: var(--gold); letter-spacing: 2px; text-transform: uppercase; }
+  .topbar-sub { font-size: 11px; color: var(--dim); font-family: 'Share Tech Mono', monospace; }
+  .spacer { flex: 1; }
+  .status-pill {
+    display: flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px;
+    background: rgba(0,255,136,0.08); border: 1px solid rgba(0,255,136,0.25);
+    font-size: 10px; font-family: 'Orbitron', monospace; color: var(--green); letter-spacing: 1px;
+  }
+  .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--green); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; box-shadow: 0 0 0 0 rgba(0,255,136,0.4); } 50% { opacity: 0.8; box-shadow: 0 0 0 4px rgba(0,255,136,0); } }
+  
+  .threat-pill {
+    display: flex; align-items: center; gap: 6px; padding: 4px 12px; border-radius: 20px;
+    font-size: 10px; font-family: 'Orbitron', monospace; letter-spacing: 1px; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .threat-pill.critical { background: rgba(255,59,59,0.12); border: 1px solid rgba(255,59,59,0.4); color: var(--red); }
+  .threat-pill.high { background: rgba(255,140,0,0.12); border: 1px solid rgba(255,140,0,0.4); color: var(--orange); }
+  
+  /* Content */
+  .content { flex: 1; overflow-y: auto; padding: 16px; display: grid; gap: 14px; }
+  .content::-webkit-scrollbar { width: 4px; }
+  .content::-webkit-scrollbar-track { background: transparent; }
+  .content::-webkit-scrollbar-thumb { background: rgba(201,168,76,0.2); border-radius: 2px; }
+
+  /* Cards */
+  .card {
+    background: linear-gradient(135deg, rgba(20,27,77,0.8) 0%, rgba(13,18,53,0.9) 100%);
+    border: 1px solid rgba(201,168,76,0.12); border-radius: 12px; padding: 16px;
+    backdrop-filter: blur(10px); position: relative; overflow: hidden;
+  }
+  .card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(201,168,76,0.4), transparent);
+  }
+  .card-title {
+    font-family: 'Orbitron', monospace; font-size: 10px; font-weight: 700;
+    color: var(--gold); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card-title .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); }
+  
+  /* Metric cards */
+  .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .metric-card {
+    background: linear-gradient(135deg, rgba(201,168,76,0.06) 0%, rgba(13,18,53,0.8) 100%);
+    border: 1px solid rgba(201,168,76,0.15); border-radius: 10px; padding: 14px;
+    position: relative; overflow: hidden;
+  }
+  .metric-card::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--gold), transparent); opacity: 0.4; }
+  .metric-val { font-family: 'Orbitron', monospace; font-size: 26px; font-weight: 900; color: var(--gold); line-height: 1; }
+  .metric-label { font-size: 10px; color: var(--dim); margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; font-family: 'Share Tech Mono', monospace; }
+  .metric-sub { font-size: 10px; color: var(--green); margin-top: 6px; }
+  .metric-card.red .metric-val { color: var(--red); }
+  .metric-card.red::after { background: linear-gradient(90deg, transparent, var(--red), transparent); }
+  .metric-card.cyan .metric-val { color: var(--cyan); }
+  .metric-card.cyan::after { background: linear-gradient(90deg, transparent, var(--cyan), transparent); }
+  .metric-card.green .metric-val { color: var(--green); }
+  .metric-card.green::after { background: linear-gradient(90deg, transparent, var(--green), transparent); }
+
+  /* Badges */
+  .badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-family: 'Orbitron', monospace; letter-spacing: 0.5px; font-weight: 700; }
+  .badge-verified { background: rgba(0,255,136,0.1); color: var(--green); border: 1px solid rgba(0,255,136,0.25); }
+  .badge-suspicious { background: rgba(255,140,0,0.1); color: var(--orange); border: 1px solid rgba(255,140,0,0.3); }
+  .badge-blocked { background: rgba(255,59,59,0.1); color: var(--red); border: 1px solid rgba(255,59,59,0.25); }
+  .badge-isolated { background: rgba(0,212,255,0.1); color: var(--cyan); border: 1px solid rgba(0,212,255,0.25); }
+  .badge-critical { background: rgba(255,59,59,0.15); color: var(--red); border: 1px solid rgba(255,59,59,0.3); }
+  .badge-high { background: rgba(255,140,0,0.12); color: var(--orange); border: 1px solid rgba(255,140,0,0.3); }
+  .badge-medium { background: rgba(201,168,76,0.1); color: var(--gold); border: 1px solid rgba(201,168,76,0.25); }
+  .badge-low { background: rgba(122,139,168,0.1); color: var(--dim); border: 1px solid rgba(122,139,168,0.2); }
+
+  /* Table */
+  .data-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .data-table th { color: var(--gold); font-family: 'Orbitron', monospace; font-size: 9px; letter-spacing: 1.5px; padding: 8px; border-bottom: 1px solid rgba(201,168,76,0.15); text-align: left; text-transform: uppercase; }
+  .data-table td { padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.04); color: var(--white); vertical-align: middle; }
+  .data-table tr:hover td { background: rgba(201,168,76,0.04); }
+  .mono { font-family: 'Share Tech Mono', monospace; font-size: 10px; color: var(--cyan); }
+
+  /* Trust bar */
+  .trust-bar-wrap { display: flex; align-items: center; gap: 8px; }
+  .trust-bar { flex: 1; height: 4px; background: rgba(255,255,255,0.08); border-radius: 2px; overflow: hidden; }
+  .trust-bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+  .trust-val { font-family: 'Orbitron', monospace; font-size: 10px; width: 28px; text-align: right; }
+
+  /* Buttons */
+  .btn {
+    padding: 7px 14px; border-radius: 6px; border: none; cursor: pointer;
+    font-family: 'Orbitron', monospace; font-size: 10px; font-weight: 700;
+    letter-spacing: 1px; text-transform: uppercase; transition: all 0.2s;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn-gold { background: linear-gradient(135deg, var(--gold), #8B6914); color: #070B1A; }
+  .btn-gold:hover { box-shadow: 0 0 15px rgba(201,168,76,0.4); transform: translateY(-1px); }
+  .btn-red { background: rgba(255,59,59,0.15); color: var(--red); border: 1px solid rgba(255,59,59,0.3); }
+  .btn-red:hover { background: rgba(255,59,59,0.25); box-shadow: 0 0 10px rgba(255,59,59,0.2); }
+  .btn-cyan { background: rgba(0,212,255,0.1); color: var(--cyan); border: 1px solid rgba(0,212,255,0.3); }
+  .btn-cyan:hover { background: rgba(0,212,255,0.2); }
+  .btn-outline { background: transparent; color: var(--dim); border: 1px solid rgba(255,255,255,0.1); }
+  .btn-outline:hover { border-color: rgba(201,168,76,0.3); color: var(--gold); }
+  .btn-sm { padding: 4px 10px; font-size: 9px; }
+
+  /* Input */
+  .input {
+    background: rgba(7,11,26,0.8); border: 1px solid rgba(201,168,76,0.2); border-radius: 6px;
+    color: var(--white); padding: 7px 12px; font-size: 12px; font-family: 'Inter', sans-serif;
+    outline: none; width: 100%;
+  }
+  .input:focus { border-color: rgba(201,168,76,0.5); box-shadow: 0 0 0 2px rgba(201,168,76,0.08); }
+  .input::placeholder { color: var(--dim); }
+  .select { appearance: none; cursor: pointer; }
+
+  /* Map */
+  .map-container { position: relative; background: #0a0f23; border-radius: 8px; overflow: hidden; }
+  .map-svg { width: 100%; }
+  .device-dot { cursor: pointer; transition: all 0.3s; }
+  .device-dot:hover { opacity: 0.8; }
+
+  /* Terminal */
+  .terminal {
+    background: #050810; border: 1px solid rgba(0,212,255,0.15); border-radius: 8px;
+    padding: 12px; font-family: 'Share Tech Mono', monospace; font-size: 11px;
+    height: 280px; overflow-y: auto; position: relative;
+  }
+  .terminal::-webkit-scrollbar { width: 3px; }
+  .terminal::-webkit-scrollbar-thumb { background: rgba(0,212,255,0.2); }
+  .terminal-line { line-height: 1.8; color: #5588aa; }
+  .terminal-line .ts { color: #2a4a5a; }
+  .terminal-line .tag-edge { color: #00aaff; }
+  .terminal-line .tag-gw { color: var(--gold); }
+  .terminal-line .tag-cloud { color: var(--green); }
+  .terminal-line .enc { color: var(--cyan); }
+  .terminal-line .pkt-id { color: #88bbcc; }
+
+  /* Threat feed */
+  .threat-item { 
+    padding: 10px 12px; border-left: 3px solid; border-radius: 0 8px 8px 0;
+    background: rgba(7,11,26,0.6); margin-bottom: 6px; animation: slideIn 0.3s ease;
+  }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+  .threat-item.Critical { border-color: var(--red); background: rgba(255,59,59,0.05); }
+  .threat-item.High { border-color: var(--orange); background: rgba(255,140,0,0.04); }
+  .threat-item.Medium { border-color: var(--gold); background: rgba(201,168,76,0.04); }
+  .threat-item.Low { border-color: var(--dim); }
+  .threat-type { font-family: 'Orbitron', monospace; font-size: 10px; font-weight: 700; }
+  .threat-desc { font-size: 11px; color: var(--dim); margin-top: 3px; }
+  .threat-meta { font-size: 10px; color: #4a5a6a; margin-top: 4px; font-family: 'Share Tech Mono', monospace; }
+
+  /* Pipeline flow */
+  .pipeline-flow { display: flex; align-items: center; gap: 12px; padding: 16px 0; }
+  .pipeline-node {
+    flex: 1; background: rgba(0,212,255,0.06); border: 1px solid rgba(0,212,255,0.2);
+    border-radius: 10px; padding: 14px; text-align: center; position: relative;
+  }
+  .pipeline-node.active { box-shadow: 0 0 20px rgba(0,212,255,0.1); }
+  .pipeline-node-title { font-family: 'Orbitron', monospace; font-size: 11px; color: var(--cyan); font-weight: 700; }
+  .pipeline-arrow { color: var(--gold); font-size: 20px; flex-shrink: 0; animation: arrowPulse 1.5s infinite; }
+  @keyframes arrowPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .enc-badge {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px;
+    background: rgba(0,255,136,0.1); border: 1px solid rgba(0,255,136,0.3);
+    font-family: 'Orbitron', monospace; font-size: 9px; color: var(--green); letter-spacing: 1px; margin-top: 6px;
+  }
+
+  /* Auth screen */
+  .auth-screen {
+    position: fixed; inset: 0; z-index: 1000;
+    background: radial-gradient(ellipse at 50% 0%, #1E2761 0%, #070B1A 60%);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .auth-card {
+    background: linear-gradient(135deg, rgba(20,27,77,0.95) 0%, rgba(7,11,26,0.98) 100%);
+    border: 1px solid rgba(201,168,76,0.25); border-radius: 16px;
+    padding: 40px; width: 420px; position: relative; overflow: hidden;
+  }
+  .auth-card::before {
+    content: ''; position: absolute; top: -50%; left: -50%; width: 200%; height: 200%;
+    background: radial-gradient(circle at 50% 0%, rgba(201,168,76,0.05) 0%, transparent 60%);
+    pointer-events: none;
+  }
+  .auth-logo { font-family: 'Orbitron', monospace; font-size: 24px; font-weight: 900; color: var(--gold); text-align: center; margin-bottom: 4px; }
+  .auth-sub { font-size: 11px; color: var(--dim); text-align: center; margin-bottom: 32px; font-family: 'Share Tech Mono', monospace; letter-spacing: 2px; }
+  .form-group { margin-bottom: 16px; }
+  .form-label { font-size: 10px; color: var(--dim); font-family: 'Orbitron', monospace; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 6px; display: block; }
+  .scan-line { 
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+    animation: scan 3s linear infinite;
+  }
+  @keyframes scan { 0% { top: 0; } 100% { top: 100%; } }
+
+  /* Blockchain */
+  .block-chain { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 8px; }
+  .block-chain::-webkit-scrollbar { height: 3px; }
+  .block-chain::-webkit-scrollbar-thumb { background: rgba(201,168,76,0.2); }
+  .block-item {
+    min-width: 160px; background: rgba(7,11,26,0.8); border: 1px solid rgba(201,168,76,0.2);
+    border-radius: 8px; padding: 10px; flex-shrink: 0; position: relative;
+    transition: all 0.2s;
+  }
+  .block-item:hover { border-color: rgba(201,168,76,0.5); transform: translateY(-2px); }
+  .block-item.genesis { border-color: rgba(0,212,255,0.4); }
+  .block-num { font-family: 'Orbitron', monospace; font-size: 10px; color: var(--gold); }
+  .block-hash { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--cyan); word-break: break-all; margin-top: 4px; }
+  .block-connector { align-self: center; color: var(--gold); font-size: 16px; flex-shrink: 0; }
+
+  /* Radar / charts */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .four-col { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  
+  /* Scrollable threat feed */
+  .threat-feed { max-height: 320px; overflow-y: auto; }
+  .threat-feed::-webkit-scrollbar { width: 3px; }
+  .threat-feed::-webkit-scrollbar-thumb { background: rgba(255,59,59,0.2); }
+
+  /* Policy row */
+  .policy-row { display: flex; align-items: center; gap: 10px; padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+  .policy-active { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
+  
+  /* Progress ring */
+  .progress-ring { transform: rotate(-90deg); }
+  
+  /* Scrollable table */
+  .table-wrap { overflow-y: auto; max-height: 340px; }
+  .table-wrap::-webkit-scrollbar { width: 3px; }
+  .table-wrap::-webkit-scrollbar-thumb { background: rgba(201,168,76,0.2); }
+
+  /* Alert banner */
+  .alert-banner {
+    position: fixed; top: 60px; right: 16px; z-index: 200;
+    display: flex; flex-direction: column; gap: 8px; max-width: 320px;
+  }
+  .alert-item {
+    background: rgba(13,18,53,0.97); border-radius: 10px; padding: 12px 14px;
+    border-left: 3px solid; animation: alertSlide 0.3s ease; backdrop-filter: blur(10px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  @keyframes alertSlide { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+  .alert-item.Critical { border-color: var(--red); }
+  .alert-item.High { border-color: var(--orange); }
+  .alert-item.Medium { border-color: var(--gold); }
+  .alert-title { font-family: 'Orbitron', monospace; font-size: 10px; font-weight: 700; }
+  .alert-title.Critical { color: var(--red); }
+  .alert-title.High { color: var(--orange); }
+  .alert-title.Medium { color: var(--gold); }
+  .alert-body { font-size: 11px; color: var(--dim); margin-top: 4px; }
+
+  /* Glow effects */
+  .glow-gold { text-shadow: 0 0 10px rgba(201,168,76,0.5); }
+  .glow-cyan { text-shadow: 0 0 10px rgba(0,212,255,0.5); }
+  .glow-red { text-shadow: 0 0 10px rgba(255,59,59,0.5); }
+  
+  /* Architecture diagram */
+  .arch-diagram { display: flex; align-items: center; justify-content: space-around; padding: 20px; }
+  .arch-layer { text-align: center; }
+  .arch-box {
+    width: 120px; padding: 12px; border-radius: 10px; margin: 0 auto 8px;
+    font-family: 'Orbitron', monospace; font-size: 10px; font-weight: 700;
+    border: 1px solid;
+  }
+  .arch-box.edge { background: rgba(255,140,0,0.08); border-color: rgba(255,140,0,0.3); color: var(--orange); }
+  .arch-box.gateway { background: rgba(201,168,76,0.08); border-color: rgba(201,168,76,0.3); color: var(--gold); }
+  .arch-box.cloud { background: rgba(0,212,255,0.08); border-color: rgba(0,212,255,0.3); color: var(--cyan); }
+  .arch-arrow { font-size: 32px; color: rgba(201,168,76,0.4); animation: arrowPulse 2s infinite; }
+  .arch-label { font-size: 10px; color: var(--dim); }
+  .arch-enc { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--green); margin-top: 4px; }
+
+  /* Score ring */  
+  .score-display { display: flex; align-items: center; justify-content: center; flex-direction: column; padding: 16px; }
+  .score-number { font-family: 'Orbitron', monospace; font-size: 48px; font-weight: 900; }
+  .score-label { font-size: 11px; color: var(--dim); margin-top: 4px; letter-spacing: 2px; text-transform: uppercase; font-family: 'Share Tech Mono', monospace; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 2px; margin-bottom: 14px; background: rgba(7,11,26,0.5); border-radius: 8px; padding: 3px; }
+  .tab { flex: 1; padding: 7px; text-align: center; border-radius: 6px; cursor: pointer; font-family: 'Orbitron', monospace; font-size: 9px; letter-spacing: 1px; text-transform: uppercase; color: var(--dim); transition: all 0.2s; border: none; background: transparent; }
+  .tab.active { background: rgba(201,168,76,0.15); color: var(--gold); border: 1px solid rgba(201,168,76,0.25); }
+  .tab:hover:not(.active) { color: var(--white); }
+
+  /* Pricing card */
+  .price-card {
+    background: linear-gradient(135deg, rgba(20,27,77,0.7) 0%, rgba(7,11,26,0.9) 100%);
+    border: 1px solid rgba(201,168,76,0.2); border-radius: 12px; padding: 20px;
+  }
+  .price-card.featured { border-color: rgba(201,168,76,0.5); box-shadow: 0 0 30px rgba(201,168,76,0.1); }
+  .price-tag { font-family: 'Orbitron', monospace; font-size: 24px; font-weight: 900; color: var(--gold); }
+  .price-period { font-size: 11px; color: var(--dim); }
+  .price-feature { font-size: 11px; color: var(--dim); padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.04); display: flex; align-items: center; gap: 6px; }
+  .price-feature::before { content: '▸'; color: var(--gold); }
+
+  /* Segment badge */
+  .segment-card { background: rgba(7,11,26,0.6); border: 1px solid rgba(201,168,76,0.15); border-radius: 10px; padding: 14px; }
+  .segment-icon { font-size: 28px; margin-bottom: 8px; }
+  .segment-name { font-family: 'Orbitron', monospace; font-size: 11px; color: var(--gold); margin-bottom: 4px; }
+  .segment-desc { font-size: 11px; color: var(--dim); }
+
+  /* Notification dot */
+  .notif-dot { position: absolute; top: 6px; right: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--red); box-shadow: 0 0 6px var(--red); animation: pulse 1s infinite; }
+
+  /* Session row */
+  .session-row { display: flex; align-items: center; gap: 10px; padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 11px; }
+  .session-avatar { width: 32px; height: 32px; border-radius: 8px; background: rgba(201,168,76,0.15); display: flex; align-items: center; justify-content: center; font-family: 'Orbitron', monospace; font-size: 12px; color: var(--gold); }
+
+  /* Responsive grid for dashboard */
+  .dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .dash-grid.triple { grid-template-columns: 1fr 1fr 1fr; }
+  .full-width { grid-column: 1 / -1; }
+
+  /* Map tooltip */
+  .map-tooltip { position: absolute; background: rgba(13,18,53,0.97); border: 1px solid rgba(201,168,76,0.3); border-radius: 8px; padding: 10px 12px; pointer-events: none; z-index: 50; font-size: 11px; backdrop-filter: blur(10px); min-width: 160px; }
+  .map-tooltip-title { font-family: 'Orbitron', monospace; font-size: 10px; color: var(--gold); margin-bottom: 6px; }
+
+  /* Heatmap gradient */
+  .heatmap-legend { display: flex; gap: 4px; align-items: center; margin-top: 8px; }
+  .heatmap-bar { flex: 1; height: 6px; border-radius: 3px; background: linear-gradient(90deg, rgba(0,255,136,0.3), rgba(255,140,0,0.5), rgba(255,59,59,0.7)); }
+`;
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+export default function App() {
+  const [authed, setAuthed] = useState(false);
+  const [user, setUser] = useState(null);
+  const [page, setPage] = useState("dashboard");
+  const [devices, setDevices] = useState([]);
+  const [threats, setThreats] = useState([]);
+  const [packets, setPackets] = useState([]);
+  const [alerts, setAlerts] = useState([]);
+  const [criticalCount, setCriticalCount] = useState(0);
+  const [aiOpen, setAiOpen] = useState(false);
+
+  // Fetch initial devices
+  const fetchDevices = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/devices`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) {
+        let initialDevices = await res.json();
+        initialDevices = initialDevices.map(d => ({ ...d, id: d.deviceId || d.id }));
+        setDevices(initialDevices);
+        return;
+      }
+    } catch (e) {
+      console.log("Backend offline - loading 500 simulated edge nodes.");
+    }
+    setDevices(generateFakeDevices());
+  };
+
+  useEffect(() => {
+    if (!authed) return;
+    socket.connect();
+    
+    fetchDevices();
+
+    socket.on('threat_event', (t) => {
+      setThreats(prev => [t, ...prev].slice(0, 200));
+      if (t.severity === "Critical" || t.severity === "High") {
+        setCriticalCount(c => c + 1);
+        setAlerts(prev => [{ ...t, id: t.id || `THR-${Date.now()}` }, ...prev].slice(0, 4));
+        setDevices(prev => prev.map(d =>
+          d.id === t.deviceId || d.deviceId === t.deviceId
+            ? { ...d, status: t.severity === "Critical" ? "Isolated" : "Suspicious", trustScore: Math.max(0, d.trustScore - 20) }
+            : d
+        ));
+      }
+    });
+
+    socket.on('pipeline_packet', (p) => {
+      setPackets(prev => [{ ...p, id: `PKT-${Date.now()}` }, ...prev].slice(0, 100));
+    });
+
+        // ─── LIVE THREAT BURST ENGINE: 1-3 threats every 3 seconds ───────────
+    const interval = setInterval(() => {
+      setDevices(currentDevices => {
+        if (currentDevices.length === 0) return currentDevices;
+        const burstCount = Math.random() < 0.25 ? 3 : Math.random() < 0.5 ? 2 : 1;
+        const newThreats = [];
+        let updated = [...currentDevices];
+        for (let b = 0; b < burstCount; b++) {
+          const t = generateThreat(currentDevices);
+          if (!t) continue;
+          newThreats.push(t);
+          const penalty = t.severity === "Critical" ? 35 : t.severity === "High" ? 25 : t.severity === "Medium" ? 12 : 5;
+          updated = updated.map(d => {
+            if (d.id === t.sourceDevice || d.deviceId === t.sourceDevice) {
+              const ns = Math.max(0, (d.trustScore || 100) - penalty);
+              const nst = t.severity === "Critical" ? "Isolated" : t.severity === "High" ? (ns < 40 ? "Blocked" : "Suspicious") : d.status === "Verified" ? "Suspicious" : d.status;
+              return { ...d, status: nst, trustScore: ns, anomalyScore: (Math.random()*0.5+0.4).toFixed(2), aiConfidence: `${(90+Math.random()*9).toFixed(1)}%`, lastSeen: new Date().toISOString() };
+            }
+            return d;
+          });
+        }
+        if (newThreats.length > 0) {
+          setThreats(prev => [...newThreats, ...prev].slice(0, 500));
+          // Notification for ALL severities every 3s
+          setAlerts(prev => [...newThreats.map(t => ({ ...t, id: t.id || `THR-${Date.now()}-${Math.random()}` })), ...prev].slice(0, 5));
+          const crit = newThreats.filter(t => t.severity === "Critical" || t.severity === "High").length;
+          if (crit > 0) setCriticalCount(c => c + crit);
+        }
+        return updated;
+      });
+    }, 3000);
+
+    return () => {
+      clearInterval(interval);
+      socket.off('threat_event');
+      socket.off('pipeline_packet');
+      socket.disconnect();
+    };
+  }, [authed]);
+
+  // Remove stale alerts
+  useEffect(() => {
+    if (alerts.length > 0) {
+      const timer = setTimeout(() => setAlerts(prev => prev.slice(0, -1)), 4000);
+      return () => clearTimeout(timer);
+    }
+  }, [alerts]);
+
+  const stats = useMemo(() => {
+    if (devices.length === 0) return { total: 0, verified: 0, suspicious: 0, blocked: 0, isolated: 0, avgTrust: 0 };
+    return {
+      total: devices.length,
+      verified: devices.filter(d => d.status === "Verified").length,
+      suspicious: devices.filter(d => d.status === "Suspicious").length,
+      blocked: devices.filter(d => d.status === "Blocked").length,
+      isolated: devices.filter(d => d.status === "Isolated").length,
+      avgTrust: Math.round(devices.reduce((a, d) => a + (d.trustScore || 0), 0) / devices.length),
+    };
+  }, [devices]);
+
+  const handleRegisterDevice = async (device) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/devices/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(device)
+      });
+      if (res.ok) {
+        const newDev = await res.json();
+        const mappedDev = { ...newDev, id: newDev.deviceId || newDev.id };
+        setDevices(prev => [mappedDev, ...prev]);
+        setAlerts(prev => [{ id: `INFO-${Date.now()}`, type: "DeviceRegistered", severity: "Low", description: `New device ${mappedDev.id} registered.`, timestamp: new Date().toISOString(), response: "CERTIFICATE_ISSUED + LEDGER_UPDATED" }, ...prev].slice(0, 4));
+      }
+    } catch (e) {
+      console.error("Failed to register device", e);
+    }
+  };
+
+  const handleTriggerAttack = (type) => {
+    // Manually triggering an attack on the frontend for UI demo purposes, since the backend handles random ones.
+    const forced = { id: `THR-TEST-${Date.now()}`, type, severity: type === "DDoS" ? "Critical" : "High", description: `Manual Simulation: ${type}`, timestamp: new Date().toISOString() };
+    setThreats(prev => [forced, ...prev]);
+    setCriticalCount(c => c + 1);
+    setAlerts(prev => [forced, ...prev].slice(0, 4));
+  };
+
+  const handleRevokeDevice = async (deviceId) => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/devices/revoke/${deviceId}`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        setDevices(prev => prev.map(d => d.id === deviceId || d.deviceId === deviceId ? { ...d, status: "Blocked", trustScore: 0, certificate: { ...(d.certificate || {}), valid: false } } : d));
+      }
+    } catch (e) {
+      console.error("Failed to revoke device", e);
+    }
+  };
+
+  if (!authed) return (
+    <>
+      <style>{css}</style>
+      <AuthScreen onLogin={(u) => { setUser(u); setAuthed(true); }} />
+    </>
+  );
+
+  const NAV = [
+    { id: "dashboard", icon: "⬡", label: "DASH" },
+    { id: "map", icon: "⊕", label: "MAP" },
+    { id: "threats", icon: "◈", label: "SOC" },
+    { id: "devices", icon: "◎", label: "DEV" },
+    { id: "pipeline", icon: "⊞", label: "PIPE" },
+    { id: "zerotrust", icon: "⬢", label: "ZT" },
+    { id: "analytics", icon: "◉", label: "AI" },
+    { id: "blockchain", icon: "⬡", label: "CHAIN" },
+    { id: "business", icon: "◆", label: "BIZ" },
+  ];
+
+  return (
+    <>
+      <style>{css}</style>
+      <div className="app">
+        {/* Sidebar */}
+        <div className="sidebar">
+          <div className="logo-mark">ZT</div>
+          {NAV.map((n, i) => (
+            <button key={n.id} className={`nav-btn ${page === n.id ? "active" : ""}`} onClick={() => setPage(n.id)} title={n.id}>
+              {n.id === "threats" && criticalCount > 0 && <span className="notif-dot" />}
+              <span style={{ fontSize: 18 }}>{n.icon}</span>
+              <span>{n.label}</span>
+            </button>
+          ))}
+          <div className="nav-sep" />
+          <button className={`nav-btn ${aiOpen ? "active" : ""}`} onClick={()=>setAiOpen(o=>!o)} title="AI Command" style={{ position:"relative" }}>
+            <span style={{ fontSize:18 }}>🤖</span>
+            <span style={{ fontSize:"7px", fontFamily:"Orbitron,monospace", letterSpacing:0.5 }}>AI CMD</span>
+            <span style={{ position:"absolute",top:4,right:4,width:7,height:7,borderRadius:"50%",background:"var(--cyan)",boxShadow:"0 0 6px var(--cyan)",animation:"pulse 2s infinite" }} />
+          </button>
+        </div>
+
+        {/* Main */}
+        <div className="main">
+          <TopBar page={page} user={user} stats={stats} criticalCount={criticalCount} onPageChange={setPage} />
+          <div className="content" style={{ gridTemplateColumns: "1fr" }}>
+            {page === "dashboard" && <DashboardPage devices={devices} threats={threats} stats={stats} packets={packets} />}
+            {page === "map" && <MapPage devices={devices} threats={threats} />}
+            {page === "threats" && <ThreatPage threats={threats} onTrigger={handleTriggerAttack} />}
+            {page === "devices" && <DevicesPage devices={devices} onRegister={handleRegisterDevice} onRevoke={handleRevokeDevice} />}
+            {page === "pipeline" && <PipelinePage packets={packets} />}
+            {page === "zerotrust" && <ZeroTrustPage devices={devices} />}
+            {page === "analytics" && <AnalyticsPage devices={devices} threats={threats} stats={stats} />}
+            {page === "blockchain" && <BlockchainPage devices={devices} />}
+            {page === "business" && <BusinessPage />}
+          </div>
+        </div>
+      </div>
+      {aiOpen && <AISidebar devices={devices} setDevices={setDevices} threats={threats} stats={stats} onClose={()=>setAiOpen(false)} />}
+
+      {/* Alert banners */}
+      <div className="alert-banner">
+        {alerts.map((a, i) => (
+          <div key={a.id + i} className={`alert-item ${a.severity}`}>
+            <div className={`alert-title ${a.severity}`}>⚠ {a.type} — {a.severity}</div>
+            <div className="alert-body">{a.description?.slice(0, 80)}</div>
+            <div style={{ fontSize: 9, color: "var(--dim)", marginTop: 4, fontFamily: "Share Tech Mono" }}>AUTO-RESPONSE: {a.response}</div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// // ─── AUTH SCREEN — MULTI-FACTOR AUTHENTICATION ────────────────────────────────
+function AuthScreen({ onLogin }) {
+  const [step, setStep] = useState("credentials"); // credentials | mfa
+  const [username, setUsername] = useState("demo");
+  const [password, setPassword] = useState("demo");
+  const [role, setRole] = useState("Admin");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [pendingUser, setPendingUser] = useState(null);
+
+  // MFA state
+  const [totpCode, setTotpCode] = useState("");
+  const [mfaInput, setMfaInput] = useState(["","","","","",""]);
+  const [countdown, setCountdown] = useState(30);
+  const [mfaLoading, setMfaLoading] = useState(false);
+  const [mfaError, setMfaError] = useState("");
+  const [biometricDone, setBiometricDone] = useState(false);
+  const inputRefs = [useRef(),useRef(),useRef(),useRef(),useRef(),useRef()];
+
+  const CREDENTIALS = { demo: "demo", admin: "Admin@ZeroTrust2024", analyst: "Analyst@ZT2024", manager: "Manager@ZT2024" };
+
+  // Generate a fresh 6-digit TOTP
+  const genTOTP = () => String(Math.floor(100000 + Math.random() * 900000));
+
+  // Start countdown + TOTP refresh
+  useEffect(() => {
+    if (step !== "mfa") return;
+    const newCode = genTOTP();
+    setTotpCode(newCode);
+    setCountdown(30);
+    const tick = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          setTotpCode(genTOTP());
+          return 30;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    // Simulate biometric scan completing after 1.5s
+    const bioTimer = setTimeout(() => setBiometricDone(true), 1500);
+    return () => { clearInterval(tick); clearTimeout(bioTimer); };
+  }, [step]);
+
+  // Step 1: credential check
+  const handleLogin = () => {
+    setLoading(true); setError("");
+    setTimeout(() => {
+      if (CREDENTIALS[username] === password) {
+        setPendingUser({ username, role, name: username.charAt(0).toUpperCase() + username.slice(1) });
+        setBiometricDone(false);
+        setMfaInput(["","","","","",""]);
+        setMfaError("");
+        setStep("mfa");
+        setLoading(false);
+      } else {
+        setError("Invalid credentials. Try: demo / demo");
+        setLoading(false);
+      }
+    }, 1500);
+  };
+
+  // OTP digit input handler
+  const handleDigit = (i, val) => {
+    if (!/^\d?$/.test(val)) return;
+    const next = [...mfaInput];
+    next[i] = val;
+    setMfaInput(next);
+    if (val && i < 5) inputRefs[i+1].current?.focus();
+    if (!val && i > 0) inputRefs[i-1].current?.focus();
+  };
+
+  const handleKeyDown = (i, e) => {
+    if (e.key === "Backspace" && !mfaInput[i] && i > 0) {
+      inputRefs[i-1].current?.focus();
+    }
+    if (e.key === "Enter") handleVerifyMFA();
+  };
+
+  // Step 2: MFA verify
+  const handleVerifyMFA = () => {
+    const entered = mfaInput.join("");
+    if (entered.length < 6) { setMfaError("Enter all 6 digits"); return; }
+    setMfaLoading(true); setMfaError("");
+    setTimeout(() => {
+      if (entered === totpCode) {
+        onLogin(pendingUser);
+      } else {
+        setMfaError("Invalid code. Use the code shown in the Authenticator panel.");
+        setMfaLoading(false);
+        setMfaInput(["","","","","",""]);
+        inputRefs[0].current?.focus();
+      }
+    }, 1200);
+  };
+
+  // Auto-fill when all digits entered
+  useEffect(() => {
+    if (mfaInput.every(d => d !== "") && step === "mfa") handleVerifyMFA();
+  }, [mfaInput]);
+
+  const circumference = 2 * Math.PI * 20;
+  const progress = circumference - (countdown / 30) * circumference;
+
+  if (step === "mfa") return (
+    <div className="auth-screen" style={{ background: "radial-gradient(ellipse at 50% 0%, #0D1235 0%, #070B1A 70%)" }}>
+      <div style={{ display: "flex", gap: 24, alignItems: "flex-start", maxWidth: 760, width: "100%", padding: "0 20px" }}>
+
+        {/* Left: Demo Authenticator App */}
+        <div style={{ width: 280, background: "linear-gradient(135deg,rgba(0,212,255,0.06),rgba(7,11,26,0.95))", border: "1px solid rgba(0,212,255,0.2)", borderRadius: 16, padding: 24, flexShrink: 0 }}>
+          <div style={{ fontFamily: "Orbitron,monospace", fontSize: 10, color: "var(--cyan)", letterSpacing: 2, marginBottom: 16 }}>◈ ZT AUTHENTICATOR</div>
+
+          {/* Biometric scanner */}
+          <div style={{ textAlign: "center", marginBottom: 20 }}>
+            <div style={{ position: "relative", display: "inline-block" }}>
+              <div style={{ width: 80, height: 80, borderRadius: "50%", border: `2px solid ${biometricDone ? "var(--green)" : "rgba(0,212,255,0.4)"}`, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto", transition: "border-color 0.5s", boxShadow: biometricDone ? "0 0 20px rgba(0,255,136,0.3)" : "0 0 20px rgba(0,212,255,0.1)" }}>
+                <span style={{ fontSize: 36 }}>{biometricDone ? "✅" : "👆"}</span>
+              </div>
+              {!biometricDone && <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, borderRadius: "50%", border: "2px solid var(--cyan)", animation: "pulse 1s infinite" }} />}
+            </div>
+            <div style={{ fontSize: 10, color: biometricDone ? "var(--green)" : "var(--cyan)", fontFamily: "Share Tech Mono,monospace", marginTop: 8 }}>
+              {biometricDone ? "✓ BIOMETRIC VERIFIED" : "SCANNING FINGERPRINT..."}
+            </div>
+          </div>
+
+          {/* TOTP Code Display */}
+          <div style={{ background: "rgba(7,11,26,0.8)", border: "1px solid rgba(0,212,255,0.2)", borderRadius: 10, padding: 14, textAlign: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono,monospace", marginBottom: 8, letterSpacing: 1 }}>TOTP CODE — EXPIRES IN</div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12 }}>
+              <div style={{ fontFamily: "Orbitron,monospace", fontSize: 28, fontWeight: 900, letterSpacing: 8, color: countdown < 8 ? "var(--red)" : "var(--cyan)", textShadow: `0 0 20px ${countdown < 8 ? "rgba(255,59,59,0.5)" : "rgba(0,212,255,0.5)"}`, transition: "color 0.3s" }}>{totpCode}</div>
+              <svg width="48" height="48" style={{ flexShrink: 0 }}>
+                <circle cx="24" cy="24" r="20" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="3" />
+                <circle cx="24" cy="24" r="20" fill="none" stroke={countdown < 8 ? "#FF3B3B" : "#00D4FF"} strokeWidth="3"
+                  strokeDasharray={circumference} strokeDashoffset={progress}
+                  style={{ transform: "rotate(-90deg)", transformOrigin: "24px 24px", transition: "stroke-dashoffset 1s linear, stroke 0.3s" }} />
+                <text x="24" y="29" textAnchor="middle" fill={countdown < 8 ? "#FF3B3B" : "#00D4FF"} fontSize="11" fontFamily="Orbitron,monospace" fontWeight="700">{countdown}s</text>
+              </svg>
+            </div>
+          </div>
+
+          {/* Info badges */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {[
+              { icon: "🔒", text: "AES-256 encrypted channel" },
+              { icon: "📡", text: "RFC 6238 TOTP standard" },
+              { icon: "🛡️", text: "Hardware security key ready" },
+            ].map((b,i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 10, color: "var(--dim)", background: "rgba(255,255,255,0.02)", borderRadius: 6, padding: "5px 8px" }}>
+                <span>{b.icon}</span><span>{b.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Right: MFA Entry Card */}
+        <div className="auth-card" style={{ flex: 1 }}>
+          <div className="scan-line" />
+          <div className="auth-logo">MFA VERIFICATION</div>
+          <div className="auth-sub">STEP 2 OF 2 — ZERO TRUST AUTHENTICATION</div>
+
+          <div style={{ background: "rgba(0,212,255,0.05)", border: "1px solid rgba(0,212,255,0.15)", borderRadius: 10, padding: "12px 14px", marginBottom: 24 }}>
+            <div style={{ fontSize: 10, color: "var(--cyan)", fontFamily: "Orbitron,monospace", marginBottom: 4 }}>IDENTITY VERIFIED</div>
+            <div style={{ fontSize: 12, color: "var(--white)" }}>Welcome, <strong style={{ color: "var(--gold)" }}>{pendingUser?.name}</strong></div>
+            <div style={{ fontSize: 10, color: "var(--dim)", marginTop: 2 }}>Role: {pendingUser?.role} · X.509 Certificate Validated · TLS 1.3 Active</div>
+          </div>
+
+          <div style={{ textAlign: "center", marginBottom: 8 }}>
+            <div style={{ fontSize: 11, color: "var(--dim)", fontFamily: "Share Tech Mono,monospace", marginBottom: 16 }}>Enter the 6-digit code from your Authenticator</div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 20 }}>
+              {mfaInput.map((d, i) => (
+                <input key={i} ref={inputRefs[i]}
+                  value={d} maxLength={1} inputMode="numeric"
+                  onChange={e => handleDigit(i, e.target.value)}
+                  onKeyDown={e => handleKeyDown(i, e)}
+                  style={{
+                    width: 52, height: 64, borderRadius: 10, border: `2px solid ${d ? "rgba(0,212,255,0.6)" : "rgba(201,168,76,0.2)"}`,
+                    background: d ? "rgba(0,212,255,0.08)" : "rgba(7,11,26,0.8)",
+                    color: "var(--cyan)", fontFamily: "Orbitron,monospace", fontSize: 26, fontWeight: 900,
+                    textAlign: "center", outline: "none", transition: "all 0.2s",
+                    boxShadow: d ? "0 0 12px rgba(0,212,255,0.2)" : "none"
+                  }} />
+              ))}
+            </div>
+            {mfaError && <div style={{ color: "var(--red)", fontSize: 11, marginBottom: 12, fontFamily: "Share Tech Mono,monospace" }}>⚠ {mfaError}</div>}
+          </div>
+
+          <button className="btn btn-gold" style={{ width: "100%", justifyContent: "center", padding: 12, marginBottom: 10 }} onClick={handleVerifyMFA} disabled={mfaLoading}>
+            {mfaLoading ? "VERIFYING CODE..." : "🔐 VERIFY & ACCESS PLATFORM"}
+          </button>
+          <button className="btn btn-outline" style={{ width: "100%", justifyContent: "center" }} onClick={() => { setStep("credentials"); setError(""); }}>
+            ← Back to Credentials
+          </button>
+
+          <div style={{ marginTop: 16, padding: 10, background: "rgba(0,0,0,0.3)", borderRadius: 8, fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono,monospace", lineHeight: 1.8 }}>
+            ZERO TRUST POLICY: Every access verified · Code from left panel · Auto-submits on 6 digits
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="auth-screen">
+      <div className="auth-card">
+        <div className="scan-line" />
+        <div className="auth-logo">ZERO TRUST</div>
+        <div className="auth-sub">SECURE CLOUD-EDGE PLATFORM v2.4.1</div>
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          {["Admin","Analyst","DeviceManager"].map(r => (
+            <button key={r} onClick={() => setRole(r)} className="btn btn-sm" style={{ margin: "0 4px", background: role===r?"rgba(201,168,76,0.2)":"transparent", border:`1px solid ${role===r?"rgba(201,168,76,0.5)":"rgba(255,255,255,0.1)"}`, color:role===r?GOLD:"#7A8BA8" }}>{r}</button>
+          ))}
+        </div>
+        <div className="form-group"><label className="form-label">Identity</label><input className="input" value={username} onChange={e=>setUsername(e.target.value)} placeholder="Username" /></div>
+        <div className="form-group"><label className="form-label">Passphrase</label><input className="input" type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" onKeyDown={e=>e.key==="Enter"&&handleLogin()} /></div>
+        <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:20 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:8, padding:"6px 12px", background:"rgba(0,212,255,0.06)", border:"1px solid rgba(0,212,255,0.2)", borderRadius:6, fontSize:10, color:"var(--cyan)", fontFamily:"Orbitron,monospace" }}>
+            🔐 MFA ENABLED · TOTP + BIOMETRIC
+          </div>
+          <div style={{ flex:1 }} />
+          <div style={{ fontSize:9, color:"var(--green)", fontFamily:"Share Tech Mono,monospace", padding:"3px 8px", background:"rgba(0,255,136,0.06)", border:"1px solid rgba(0,255,136,0.2)", borderRadius:4 }}>X.509 CERT READY</div>
+        </div>
+        {error && <div style={{ color:"var(--red)", fontSize:11, marginBottom:12, fontFamily:"Share Tech Mono,monospace" }}>⚠ {error}</div>}
+        <button className="btn btn-gold" style={{ width:"100%", justifyContent:"center", padding:12 }} onClick={handleLogin} disabled={loading}>
+          {loading?"AUTHENTICATING...":"AUTHENTICATE → MFA"}
+        </button>
+        <div style={{ marginTop:16, padding:12, background:"rgba(0,0,0,0.3)", borderRadius:8, fontSize:10, color:"var(--dim)", fontFamily:"Share Tech Mono,monospace" }}>
+          QUICK ACCESS: demo / demo &nbsp;|&nbsp; STEP 1 OF 2: CREDENTIALS &nbsp;|&nbsp; STEP 2: TOTP MFA
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── TOPBAR ───────────────────────────────────────────────────────────────────
+function TopBar({ page, user, stats, criticalCount, onPageChange }) {
+  const PAGE_TITLES = {
+    dashboard: "Security Operations Center", map: "Edge Device Intelligence Map",
+    threats: "Threat Command Center", devices: "Device Registry Console",
+    pipeline: "Secure Data Pipeline Monitor", zerotrust: "Zero Trust Policy Dashboard",
+    analytics: "AI Security Analytics", blockchain: "Blockchain Device Ledger",
+    business: "Business Intelligence"
+  };
+  const [time, setTime] = useState(new Date());
+  useEffect(() => {
+    const t = setInterval(() => setTime(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  return (
+    <div className="topbar">
+      <div>
+        <div className="topbar-title">{PAGE_TITLES[page]}</div>
+        <div className="topbar-sub">{time.toISOString().slice(0, 19).replace("T", " ")} UTC | {user?.role?.toUpperCase()} SESSION</div>
+      </div>
+      <div className="spacer" />
+      <div className="status-pill"><div className="pulse" />{stats.verified} VERIFIED</div>
+      {criticalCount > 0 && (
+        <div className={`threat-pill ${criticalCount > 5 ? "critical" : "high"}`} onClick={() => onPageChange("threats")}>
+          ⚠ {criticalCount} THREATS
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: "var(--dim)", fontFamily: "Share Tech Mono", padding: "4px 10px", background: "rgba(201,168,76,0.06)", borderRadius: 6, border: "1px solid rgba(201,168,76,0.15)" }}>
+        {user?.name?.toUpperCase()} · {user?.role}
+      </div>
+    </div>
+  );
+}
+
+// ─── DASHBOARD ────────────────────────────────────────────────────────────────
+function DashboardPage({ devices, threats, stats, packets }) {
+  const recentThreats = threats.slice(0, 5);
+  const trendData = useMemo(() => Array.from({ length: 24 }, (_, i) => ({
+    h: `${String(i).padStart(2, "0")}:00`,
+    threats: Math.floor(Math.random() * 8) + 1,
+    blocked: Math.floor(Math.random() * 5),
+    trust: Math.floor(Math.random() * 20) + 70
+  })), []);
+
+  const trustDist = [
+    { name: "81-100", value: stats.verified, fill: "#00FF88" },
+    { name: "61-80", value: Math.floor(stats.total * 0.08), fill: "#C9A84C" },
+    { name: "31-60", value: stats.suspicious, fill: "#FF8C00" },
+    { name: "0-30", value: stats.blocked + stats.isolated, fill: "#FF3B3B" },
+  ];
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      {/* Metrics */}
+      <div className="metric-grid">
+        <div className="metric-card"><div className="metric-val">{stats.total}</div><div className="metric-label">Total Devices</div><div className="metric-sub">↑ 3 registered today</div></div>
+        <div className="metric-card green"><div className="metric-val">{stats.verified}</div><div className="metric-label">Verified</div><div className="metric-sub">98.6% prevention rate</div></div>
+        <div className="metric-card red"><div className="metric-val">{stats.suspicious + stats.blocked + stats.isolated}</div><div className="metric-label">At Risk</div><div className="metric-sub">Auto-response active</div></div>
+        <div className="metric-card cyan"><div className="metric-val">{stats.avgTrust}</div><div className="metric-label">Avg Trust Score</div><div className="metric-sub">AI-computed, live</div></div>
+      </div>
+
+      {/* Architecture */}
+      <div className="card">
+        <div className="card-title"><span className="dot" />Architecture — Edge → Gateway → Cloud Zero Trust Model</div>
+        <div className="arch-diagram">
+          {[
+            { label: "EDGE DEVICES", cls: "edge", sub: "500 IoT/Industrial", enc: "AES-256 Storage", attack: "← Device Spoofing" },
+            null,
+            { label: "GATEWAY LAYER", cls: "gateway", sub: "PKI + mTLS Auth", enc: "TLS 1.3 Transit", attack: "← MITM Attack" },
+            null,
+            { label: "CLOUD PLATFORM", cls: "cloud", sub: "Zero Trust Core", enc: "AES-256 + TLS 1.3", attack: "← DDoS Attack" }
+          ].map((item, i) => item ? (
+            <div key={i} className="arch-layer">
+              <div className={`arch-box ${item.cls}`}>{item.label}<br /><span style={{ fontSize: 9, opacity: 0.7 }}>{item.sub}</span></div>
+              <div className="arch-enc">🔒 {item.enc}</div>
+              <div style={{ fontSize: 9, color: "var(--red)", marginTop: 4 }}>{item.attack}</div>
+            </div>
+          ) : <div key={i} className="arch-arrow">→</div>)}
+        </div>
+        <div style={{ display: "flex", justifyContent: "center", gap: 16, marginTop: 8 }}>
+          {["100% Encrypted", "Zero Trust Policy", "AI Threat Intel", "Auto-Response"].map(b => (
+            <div key={b} className="enc-badge">✓ {b}</div>
+          ))}
+        </div>
+      </div>
+
+      <div className="dash-grid">
+        {/* Threat timeline */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />24h Threat Timeline</div>
+          <ResponsiveContainer width="100%" height={160}>
+            <AreaChart data={trendData}>
+              <defs>
+                <linearGradient id="tg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#FF3B3B" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#FF3B3B" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="h" tick={{ fill: "#4a5a6a", fontSize: 8 }} interval={5} />
+              <YAxis tick={{ fill: "#4a5a6a", fontSize: 8 }} />
+              <Tooltip contentStyle={{ background: "#0D1235", border: "1px solid rgba(201,168,76,0.2)", borderRadius: 8, fontSize: 11 }} />
+              <Area type="monotone" dataKey="threats" stroke="#FF3B3B" fill="url(#tg)" strokeWidth={2} />
+              <Area type="monotone" dataKey="blocked" stroke="#C9A84C" fill="none" strokeWidth={1.5} strokeDasharray="3 3" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Trust distribution */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />Trust Score Distribution</div>
+          <div style={{ display: "flex", alignItems: "center" }}>
+            <ResponsiveContainer width="50%" height={160}>
+              <PieChart>
+                <Pie data={trustDist} cx="50%" cy="50%" innerRadius={40} outerRadius={65} dataKey="value" paddingAngle={2}>
+                  {trustDist.map((e, i) => <Cell key={i} fill={e.fill} />)}
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
+            <div style={{ flex: 1 }}>
+              {trustDist.map(d => (
+                <div key={d.name} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 11 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: 2, background: d.fill }} />
+                  <span style={{ color: "var(--dim)" }}>{d.name}</span>
+                  <span style={{ marginLeft: "auto", fontFamily: "Share Tech Mono", color: d.fill }}>{d.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="dash-grid">
+        {/* Recent threats */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />Recent Threat Activity</div>
+          <div>
+            {recentThreats.length === 0 ? (
+              <div style={{ color: "var(--dim)", fontSize: 11, textAlign: "center", padding: 20 }}>Monitoring... No threats detected</div>
+            ) : recentThreats.map(t => (
+              <div key={t.id} className={`threat-item ${t.severity}`}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className={`badge badge-${t.severity.toLowerCase()}`}>{t.severity}</span>
+                  <span className="threat-type" style={{ color: t.severity === "Critical" ? "var(--red)" : t.severity === "High" ? "var(--orange)" : "var(--gold)" }}>{t.type}</span>
+                  <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono" }}>{new Date(t.timestamp).toLocaleTimeString()}</span>
+                </div>
+                <div className="threat-desc">{t.description}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Key metrics */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />Security Posture KPIs</div>
+          {[
+            { label: "Attack Prevention Rate", val: "98.6%", color: GREEN, pct: 98.6 },
+            { label: "Auth Latency (avg)", val: "<10ms", color: CYAN, pct: 95 },
+            { label: "IDS Accuracy", val: "96.3%", color: GOLD, pct: 96.3 },
+            { label: "Encryption Coverage", val: "100%", color: GREEN, pct: 100 },
+            { label: "Zero Trust Compliance", val: "99.1%", color: CYAN, pct: 99.1 },
+            { label: "Auto-Response Rate", val: "94.7%", color: GOLD, pct: 94.7 },
+          ].map(k => (
+            <div key={k.label} style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
+                <span style={{ color: "var(--dim)" }}>{k.label}</span>
+                <span style={{ fontFamily: "Orbitron, monospace", fontSize: 11, color: k.color }}>{k.val}</span>
+              </div>
+              <div className="trust-bar"><div className="trust-bar-fill" style={{ width: `${k.pct}%`, background: k.color }} /></div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAP PAGE ─────────────────────────────────────────────────────────────────
+function MapPage({ devices, threats }) {
+  const [tooltip, setTooltip] = useState(null);
+  const [filter, setFilter] = useState("All");
+
+  // Project lat/lng to SVG coordinates (simple equirectangular)
+  const project = (lat, lng) => {
+    const x = (lng + 180) * (800 / 360);
+    const y = (90 - lat) * (400 / 180);
+    return { x, y };
+  };
+
+  const statusColor = { Verified: GREEN, Suspicious: ORANGE, Blocked: RED, Isolated: CYAN };
+  const filtered = filter === "All" ? devices : devices.filter(d => d.status === filter);
+
+  // Stats by region
+  const regionStats = useMemo(() => {
+    const r = {};
+    devices.forEach(d => {
+      const c = d.location.country;
+      if (!r[c]) r[c] = { total: 0, suspicious: 0, blocked: 0 };
+      r[c].total++;
+      if (d.status === "Suspicious") r[c].suspicious++;
+      if (d.status === "Blocked" || d.status === "Isolated") r[c].blocked++;
+    });
+    return r;
+  }, [devices]);
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        {["All", "Verified", "Suspicious", "Blocked", "Isolated"].map(s => (
+          <button key={s} onClick={() => setFilter(s)} className="btn btn-sm" style={{
+            background: filter === s ? "rgba(201,168,76,0.2)" : "transparent",
+            border: `1px solid ${filter === s ? "rgba(201,168,76,0.5)" : "rgba(255,255,255,0.1)"}`,
+            color: filter === s ? GOLD : "#7A8BA8"
+          }}>{s} {s !== "All" ? `(${devices.filter(d => d.status === s).length})` : `(${devices.length})`}</button>
+        ))}
+        <div style={{ flex: 1 }} />
+        <div className="enc-badge">🌍 GLOBAL COVERAGE — {devices.length} NODES</div>
+      </div>
+
+      <div className="card">
+        <div className="card-title"><span className="dot" />Real-Time Edge Device Intelligence Map — {filtered.length} Devices Visible</div>
+        <div className="map-container" style={{ position: "relative" }}>
+          <svg viewBox="0 0 800 400" className="map-svg" style={{ display: "block" }}>
+            {/* World background */}
+            <rect width="800" height="400" fill="#070B1A" />
+            {/* Grid lines */}
+            {Array.from({ length: 9 }, (_, i) => (
+              <line key={`h${i}`} x1="0" y1={i * 50} x2="800" y2={i * 50} stroke="rgba(255,255,255,0.04)" strokeWidth="0.5" />
+            ))}
+            {Array.from({ length: 17 }, (_, i) => (
+              <line key={`v${i}`} x1={i * 50} y1="0" x2={i * 50} y2="400" stroke="rgba(255,255,255,0.04)" strokeWidth="0.5" />
+            ))}
+
+            {/* Simplified continent shapes */}
+            <path d="M 160,80 L 200,70 L 240,90 L 260,120 L 240,160 L 200,170 L 170,140 L 150,110 Z" fill="rgba(30,39,97,0.5)" stroke="rgba(201,168,76,0.15)" strokeWidth="0.5" />
+            <path d="M 340,60 L 420,50 L 500,70 L 520,110 L 500,150 L 440,160 L 380,130 L 330,100 Z" fill="rgba(30,39,97,0.5)" stroke="rgba(201,168,76,0.15)" strokeWidth="0.5" />
+            <path d="M 380,170 L 440,165 L 460,200 L 440,240 L 400,250 L 375,220 Z" fill="rgba(30,39,97,0.4)" stroke="rgba(201,168,76,0.1)" strokeWidth="0.5" />
+            <path d="M 540,80 L 620,75 L 680,100 L 700,140 L 660,170 L 600,160 L 550,130 L 530,100 Z" fill="rgba(30,39,97,0.5)" stroke="rgba(201,168,76,0.15)" strokeWidth="0.5" />
+            <path d="M 620,200 L 680,195 L 720,220 L 710,270 L 660,280 L 610,250 Z" fill="rgba(30,39,97,0.4)" stroke="rgba(201,168,76,0.1)" strokeWidth="0.5" />
+
+            {/* Heatmap circles for high-risk areas */}
+            {devices.filter(d => d.status !== "Verified").slice(0, 20).map((d, i) => {
+              const { x, y } = project(d.location.lat, d.location.lng);
+              return (
+                <circle key={`heat${i}`} cx={x} cy={y} r={20} fill={d.status === "Blocked" ? "rgba(255,59,59,0.06)" : "rgba(255,140,0,0.06)"} />
+              );
+            })}
+
+            {/* Device dots */}
+            {filtered.map(d => {
+              const { x, y } = project(d.location.lat, d.location.lng);
+              const col = statusColor[d.status] || GREEN;
+              return (
+                <g key={d.id}
+                  onMouseEnter={(e) => setTooltip({ device: d, x: e.clientX, y: e.clientY })}
+                  onMouseLeave={() => setTooltip(null)}
+                  style={{ cursor: "pointer" }}>
+                  {d.status !== "Verified" && (
+                    <circle cx={x} cy={y} r={8} fill="none" stroke={col} strokeWidth="1" opacity="0.4" className="device-dot">
+                      <animate attributeName="r" values="4;10;4" dur="2s" repeatCount="indefinite" />
+                      <animate attributeName="opacity" values="0.4;0;0.4" dur="2s" repeatCount="indefinite" />
+                    </circle>
+                  )}
+                  <circle cx={x} cy={y} r={d.status === "Verified" ? 2.5 : 3.5}
+                    fill={col} opacity={0.9}
+                    style={{ filter: d.status !== "Verified" ? `drop-shadow(0 0 3px ${col})` : "none" }} />
+                </g>
+              );
+            })}
+          </svg>
+
+          {/* Legend */}
+          <div style={{ position: "absolute", bottom: 12, left: 12, display: "flex", gap: 10 }}>
+            {Object.entries(statusColor).map(([s, c]) => (
+              <div key={s} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 9, fontFamily: "Orbitron, monospace", color: c }}>
+                <div style={{ width: 7, height: 7, borderRadius: "50%", background: c }} />
+                {s}
+              </div>
+            ))}
+          </div>
+
+          {/* Tooltip */}
+          {tooltip && (
+            <div className="map-tooltip" style={{ left: tooltip.x + 10, top: tooltip.y - 80, position: "fixed" }}>
+              <div className="map-tooltip-title">{tooltip.device.id}</div>
+              <div style={{ fontSize: 10, color: "var(--dim)" }}>{tooltip.device.name}</div>
+              <div style={{ fontSize: 10, color: "var(--dim)", marginTop: 4 }}>📍 {tooltip.device.location.city}, {tooltip.device.location.country}</div>
+              <div style={{ marginTop: 6 }}>
+                <span className={`badge badge-${tooltip.device.status.toLowerCase()}`}>{tooltip.device.status}</span>
+                <span style={{ fontFamily: "Orbitron, monospace", fontSize: 10, marginLeft: 8, color: tooltip.device.trustScore > 70 ? GREEN : tooltip.device.trustScore > 40 ? ORANGE : RED }}>
+                  Trust: {tooltip.device.trustScore}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Risk heatmap legend */}
+        <div className="heatmap-legend">
+          <span style={{ fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono" }}>RISK HEATMAP:</span>
+          <div className="heatmap-bar" />
+          <span style={{ fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono" }}>LOW → HIGH</span>
+        </div>
+      </div>
+
+      {/* Region stats */}
+      <div className="card">
+        <div className="card-title"><span className="dot" />Regional Risk Distribution</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
+          {Object.entries(regionStats).slice(0, 10).map(([country, data]) => (
+            <div key={country} style={{ background: "rgba(7,11,26,0.5)", border: "1px solid rgba(201,168,76,0.1)", borderRadius: 8, padding: 10 }}>
+              <div style={{ fontSize: 10, fontFamily: "Orbitron, monospace", color: "var(--gold)", marginBottom: 6 }}>{country}</div>
+              <div style={{ fontSize: 18, fontFamily: "Orbitron, monospace", color: "var(--white)" }}>{data.total}</div>
+              <div style={{ fontSize: 9, color: "var(--orange)" }}>⚠ {data.suspicious} suspicious</div>
+              <div style={{ fontSize: 9, color: "var(--red)" }}>✗ {data.blocked} blocked</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── THREAT PAGE ──────────────────────────────────────────────────────────────
+function ThreatPage({ threats, onTrigger }) {
+  const [activeTab, setActiveTab] = useState("feed");
+
+  const typeData = useMemo(() => {
+    const counts = {};
+    threats.forEach(t => counts[t.type] = (counts[t.type] || 0) + 1);
+    return Object.entries(counts).map(([name, value]) => ({ name, value }));
+  }, [threats]);
+
+  const sevColors = { Critical: RED, High: ORANGE, Medium: GOLD, Low: "#7A8BA8" };
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      {/* Attack simulation panel */}
+      <div className="card" style={{ borderColor: "rgba(255,59,59,0.25)", background: "linear-gradient(135deg, rgba(255,59,59,0.05), rgba(13,18,53,0.9))" }}>
+        <div className="card-title" style={{ color: "var(--red)" }}><span className="dot" style={{ background: "var(--red)" }} />Manual Attack Simulation Panel</div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {[
+            { type: "MITM", label: "TRIGGER MITM ATTACK", icon: "⚡" },
+            { type: "DeviceSpoofing", label: "TRIGGER SPOOFING", icon: "👾" },
+            { type: "DDoS", label: "TRIGGER DDoS", icon: "💥" },
+            { type: "UnauthorizedAccess", label: "UNAUTHORIZED ACCESS", icon: "🔓" },
+            { type: "DataExfiltration", label: "DATA EXFILTRATION", icon: "📤" },
+            { type: "BruteForce", label: "BRUTE FORCE ATTACK", icon: "🔨" },
+          ].map(a => (
+            <button key={a.type} className="btn btn-red" onClick={() => onTrigger(a.type)}>
+              {a.icon} {a.label}
+            </button>
+          ))}
+        </div>
+        <div style={{ marginTop: 10, fontSize: 10, color: "var(--dim)", fontFamily: "Share Tech Mono" }}>
+          ↳ Triggering an attack will instantly update device status, push WebSocket alert, and activate autonomous response
+        </div>
+      </div>
+
+      <div className="tabs">
+        {["feed", "timeline", "stats"].map(t => (
+          <button key={t} className={`tab ${activeTab === t ? "active" : ""}`} onClick={() => setActiveTab(t)}>
+            {t === "feed" ? "LIVE FEED" : t === "timeline" ? "TIMELINE" : "ANALYTICS"}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "feed" && (
+        <div className="dash-grid">
+          <div className="card">
+            <div className="card-title"><span className="dot" />Live Threat Feed <span style={{ fontSize: 9, marginLeft: 8, color: "var(--red)", animation: "pulse 1s infinite" }}>● LIVE</span></div>
+            <div className="threat-feed">
+              {threats.slice(0, 30).map(t => (
+                <div key={t.id} className={`threat-item ${t.severity}`}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span className={`badge badge-${t.severity.toLowerCase()}`}>{t.severity}</span>
+                    <span className="threat-type" style={{ color: sevColors[t.severity] }}>{t.type}</span>
+                    <span style={{ marginLeft: "auto", fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono" }}>{new Date(t.timestamp).toLocaleTimeString()}</span>
+                  </div>
+                  <div className="threat-desc">{t.description}</div>
+                  <div className="threat-meta">SRC: {t.sourceDevice} | CVSS: {t.cvss} | RESPONSE: {t.response}</div>
+                </div>
+              ))}
+              {threats.length === 0 && <div style={{ color: "var(--dim)", textAlign: "center", padding: 30, fontSize: 11 }}>Monitoring... Awaiting threat events</div>}
+            </div>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div className="metric-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+              <div className="metric-card red"><div className="metric-val">{threats.filter(t => t.severity === "Critical").length}</div><div className="metric-label">Critical</div></div>
+              <div className="metric-card" style={{ "--metric-color": ORANGE }}><div className="metric-val" style={{ color: ORANGE }}>{threats.filter(t => t.severity === "High").length}</div><div className="metric-label">High</div></div>
+              <div className="metric-card"><div className="metric-val" style={{ color: GOLD }}>{threats.filter(t => t.severity === "Medium").length}</div><div className="metric-label">Medium</div></div>
+              <div className="metric-card"><div className="metric-val">{threats.filter(t => t.severity === "Low").length}</div><div className="metric-label">Low</div></div>
+            </div>
+
+            <div className="card">
+              <div className="card-title"><span className="dot" />By Attack Type</div>
+              <ResponsiveContainer width="100%" height={160}>
+                <BarChart data={typeData} layout="vertical">
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" horizontal={false} />
+                  <XAxis type="number" tick={{ fill: "#4a5a6a", fontSize: 9 }} />
+                  <YAxis dataKey="name" type="category" tick={{ fill: "#7A8BA8", fontSize: 9 }} width={80} />
+                  <Tooltip contentStyle={{ background: "#0D1235", border: "1px solid rgba(201,168,76,0.2)", fontSize: 11 }} />
+                  <Bar dataKey="value" fill={GOLD} radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "timeline" && (
+        <div className="card">
+          <div className="card-title"><span className="dot" />Threat Timeline (Last 48 Events)</div>
+          <div style={{ maxHeight: 480, overflowY: "auto" }} className="threat-feed">
+            <table className="data-table" style={{ width: "100%" }}>
+              <thead>
+                <tr>
+                  <th>ID</th><th>Type</th><th>Severity</th><th>Source</th><th>Description</th><th>Response</th><th>Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {threats.slice(0, 48).map(t => (
+                  <tr key={t.id}>
+                    <td className="mono">{t.id}</td>
+                    <td><span style={{ color: sevColors[t.severity], fontFamily: "Orbitron, monospace", fontSize: 10 }}>{t.type}</span></td>
+                    <td><span className={`badge badge-${t.severity.toLowerCase()}`}>{t.severity}</span></td>
+                    <td className="mono">{t.sourceDevice}</td>
+                    <td style={{ fontSize: 10, color: "var(--dim)", maxWidth: 200 }}>{t.description?.slice(0, 60)}...</td>
+                    <td style={{ fontSize: 9, color: GREEN, fontFamily: "Share Tech Mono" }}>{t.response}</td>
+                    <td className="mono">{new Date(t.timestamp).toLocaleTimeString()}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "stats" && (
+        <div className="dash-grid">
+          <div className="card">
+            <div className="card-title"><span className="dot" />Threat Type Distribution</div>
+            <ResponsiveContainer width="100%" height={240}>
+              <PieChart>
+                <Pie data={typeData} cx="50%" cy="50%" outerRadius={90} dataKey="value" label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`} labelLine={false}>
+                  {typeData.map((e, i) => <Cell key={i} fill={[RED, ORANGE, GOLD, CYAN, GREEN, "#9B59B6"][i % 6]} />)}
+                </Pie>
+                <Tooltip contentStyle={{ background: "#0D1235", border: "1px solid rgba(201,168,76,0.2)", fontSize: 11 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+          <div className="card">
+            <div className="card-title"><span className="dot" />IDS Response Performance</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {[
+                { label: "Detection Accuracy", val: 96.3, color: GREEN },
+                { label: "True Positive Rate", val: 94.8, color: CYAN },
+                { label: "False Positive Rate", val: 3.7, color: RED, invert: true },
+                { label: "Response Time < 1s", val: 99.2, color: GOLD },
+                { label: "Auto-Mitigation Rate", val: 94.7, color: GREEN },
+              ].map(m => (
+                <div key={m.label}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 4 }}>
+                    <span style={{ color: "var(--dim)" }}>{m.label}</span>
+                    <span style={{ fontFamily: "Orbitron, monospace", color: m.color }}>{m.val}%</span>
+                  </div>
+                  <div className="trust-bar"><div className="trust-bar-fill" style={{ width: `${m.val}%`, background: m.color }} /></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── DEVICES PAGE ──────────────────────────────────────────────────────────────
+function DevicesPage({ devices, onRegister, onRevoke }) {
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [sortBy, setSortBy] = useState("trustScore");
+  const [showReg, setShowReg] = useState(false);
+  const [newDevice, setNewDevice] = useState({ name: "", type: "sensor", city: "Mumbai", lat: 19.076, lng: 72.877 });
+  const [page, setPage] = useState(1);
+  const PER_PAGE = 20;
+
+  const filtered = useMemo(() => {
+    let d = [...devices];
+    if (search) d = d.filter(dev => dev.id.toLowerCase().includes(search.toLowerCase()) || dev.name?.toLowerCase().includes(search.toLowerCase()) || dev.location?.city?.toLowerCase().includes(search.toLowerCase()));
+    if (statusFilter !== "All") d = d.filter(dev => dev.status === statusFilter);
+    d.sort((a, b) => sortBy === "trustScore" ? a.trustScore - b.trustScore : a.id.localeCompare(b.id));
+    return d;
+  }, [devices, search, statusFilter, sortBy]);
+
+  const paginated = filtered.slice((page - 1) * PER_PAGE, page * PER_PAGE);
+  const totalPages = Math.ceil(filtered.length / PER_PAGE);
+
+  const trustColor = (s) => s > 70 ? GREEN : s > 40 ? ORANGE : RED;
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      {/* Controls */}
+      <div className="card" style={{ padding: "12px 16px" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <input className="input" style={{ width: 220 }} placeholder="Search ID, name, city..." value={search} onChange={e => { setSearch(e.target.value); setPage(1); }} />
+          <select className="input select" style={{ width: 130 }} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+            {["All", "Verified", "Suspicious", "Blocked", "Isolated"].map(s => <option key={s}>{s}</option>)}
+          </select>
+          <select className="input select" style={{ width: 150 }} value={sortBy} onChange={e => setSortBy(e.target.value)}>
+            <option value="trustScore">Sort: Trust Score</option>
+            <option value="id">Sort: Device ID</option>
+          </select>
+          <div style={{ flex: 1 }} />
+          <span style={{ fontSize: 11, color: "var(--dim)" }}>{filtered.length} devices</span>
+          <button className="btn btn-gold" onClick={() => setShowReg(true)}>+ REGISTER DEVICE</button>
+        </div>
+      </div>
+
+      {/* Register modal */}
+      {showReg && (
+        <div className="card" style={{ borderColor: "rgba(0,212,255,0.3)", background: "linear-gradient(135deg, rgba(0,212,255,0.04), rgba(13,18,53,0.95))" }}>
+          <div className="card-title"><span className="dot" style={{ background: "var(--cyan)" }} />Register New Edge Device</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 12 }}>
+            <div><label className="form-label">Device Name</label><input className="input" value={newDevice.name} onChange={e => setNewDevice(p => ({ ...p, name: e.target.value }))} placeholder="SENSOR-Mumbai-501" /></div>
+            <div><label className="form-label">Type</label><select className="input select" value={newDevice.type} onChange={e => setNewDevice(p => ({ ...p, type: e.target.value }))}>{DEVICE_TYPES.map(t => <option key={t}>{t}</option>)}</select></div>
+            <div><label className="form-label">City</label><select className="input select" value={newDevice.city} onChange={e => { const c = CITIES.find(ci => ci.city === e.target.value); setNewDevice(p => ({ ...p, city: e.target.value, lat: c?.lat, lng: c?.lng })); }}>{CITIES.map(c => <option key={c.city}>{c.city}</option>)}</select></div>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button className="btn btn-gold" onClick={() => { onRegister(newDevice); setShowReg(false); setNewDevice({ name: "", type: "sensor", city: "Mumbai", lat: 19.076, lng: 72.877 }); }}>REGISTER & ISSUE CERTIFICATE</button>
+            <button className="btn btn-outline" onClick={() => setShowReg(false)}>CANCEL</button>
+          </div>
+        </div>
+      )}
+
+      {/* Table */}
+      <div className="card" style={{ padding: 0 }}>
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead><tr><th>Device ID</th><th>Name</th><th>Type</th><th>Location</th><th>Status</th><th>Trust Score</th><th>Certificate</th><th>Last Seen</th><th>Actions</th></tr></thead>
+            <tbody>
+              {paginated.map(d => (
+                <tr key={d.id}>
+                  <td className="mono">{d.id}</td>
+                  <td style={{ fontSize: 11 }}>{d.name}</td>
+                  <td><span style={{ fontSize: 9, fontFamily: "Orbitron, monospace", color: "var(--dim)", background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: 3 }}>{d.type}</span></td>
+                  <td style={{ fontSize: 10, color: "var(--dim)" }}>📍 {d.location.city}</td>
+                  <td><span className={`badge badge-${d.status.toLowerCase()}`}>{d.status}</span></td>
+                  <td>
+                    <div className="trust-bar-wrap">
+                      <div className="trust-bar"><div className="trust-bar-fill" style={{ width: `${d.trustScore}%`, background: trustColor(d.trustScore) }} /></div>
+                      <div className="trust-val" style={{ color: trustColor(d.trustScore) }}>{d.trustScore}</div>
+                    </div>
+                  </td>
+                  <td>
+                    <span style={{ fontSize: 9, fontFamily: "Share Tech Mono", color: d.certificate?.valid ? GREEN : RED }}>
+                      {d.certificate?.valid ? "✓ VALID" : "✗ EXPIRED"} · {d.certificate?.issuer?.slice(0, 10)}
+                    </span>
+                  </td>
+                  <td style={{ fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono" }}>{new Date(d.lastSeen).toLocaleTimeString()}</td>
+                  <td>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button className="btn btn-sm btn-outline" title="View Details">⊞</button>
+                      {d.status !== "Blocked" && <button className="btn btn-sm btn-red" onClick={() => onRevoke(d.id)} title="Revoke">✗</button>}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 16px", borderTop: "1px solid rgba(255,255,255,0.05)" }}>
+          <span style={{ fontSize: 11, color: "var(--dim)" }}>Page {page} of {totalPages}</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn btn-sm btn-outline" onClick={() => setPage(p => Math.max(1, p - 1))} disabled={page === 1}>← PREV</button>
+            <button className="btn btn-sm btn-outline" onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}>NEXT →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── PIPELINE PAGE ────────────────────────────────────────────────────────────
+function PipelinePage({ packets: socketPackets }) {
+  const termRef = useRef(null);
+  const [localPackets, setLocalPackets] = useState([]);
+  const [paused, setPaused] = useState(false);
+  const [filter, setFilter] = useState("ALL");
+  const [bpsData, setBpsData] = useState(() =>
+    Array.from({ length: 30 }, (_, i) => ({ t: i, bps: Math.floor(Math.random()*800+200) }))
+  );
+  const counterRef = useRef(0);
+
+  const PKT_TYPES  = ["TELEMETRY","AUTH","CONTROL","HEARTBEAT","DATA","ALERT","SYNC","HANDSHAKE"];
+  const STAGES     = ["EDGE","GATEWAY","CLOUD"];
+  const ENCS       = ["AES-256-GCM","TLS-1.3","mTLS","AES-256-CBC","ChaCha20-Poly1305"];
+  const PROTOCOLS  = ["MQTT/TLS","HTTPS","gRPC-TLS","CoAP/DTLS","AMQP/TLS","WebSocket-TLS"];
+  const CITIES_SHORT = ["MUM","DEL","NYC","TKY","SGP","DXB","SYD","BER","TOR","LON","PAR","BNG","HYD","CHN","SAO"];
+  const STATUSES   = ["ENCRYPTED","VERIFIED","FORWARDED","PROCESSED","CACHED","QUEUED"];
+  const typeColor  = { TELEMETRY:"#00D4FF",AUTH:"#C9A84C",CONTROL:"#FF8C00",HEARTBEAT:"#00FF88",DATA:"#9B59B6",ALERT:"#FF3B3B",SYNC:"#1abc9c",HANDSHAKE:"#e74c3c" };
+  const stageColor = { EDGE:"#00aaff",GATEWAY:"#C9A84C",CLOUD:"#00FF88" };
+
+  function genPacket() {
+    counterRef.current++;
+    const n = counterRef.current;
+    const stage = STAGES[Math.floor(Math.random()*3)];
+    const type  = PKT_TYPES[Math.floor(Math.random()*PKT_TYPES.length)];
+    const srcCity  = CITIES_SHORT[Math.floor(Math.random()*CITIES_SHORT.length)];
+    const dstCity  = CITIES_SHORT[Math.floor(Math.random()*CITIES_SHORT.length)];
+    const enc   = ENCS[Math.floor(Math.random()*ENCS.length)];
+    const proto = PROTOCOLS[Math.floor(Math.random()*PROTOCOLS.length)];
+    const size  = Math.floor(Math.random()*4096+64);
+    const latency = (Math.random()*12+0.4).toFixed(2);
+    const status  = STATUSES[Math.floor(Math.random()*STATUSES.length)];
+    const seqHex  = n.toString(16).toUpperCase().padStart(6,"0");
+    const devId   = `DEV-${srcCity}-${String(Math.floor(Math.random()*500)+1).padStart(5,"0")}`;
+    const sessionId = Math.random().toString(36).substring(2,10).toUpperCase();
+    const hash    = Array.from({length:8},()=>Math.floor(Math.random()*16).toString(16)).join("").toUpperCase();
+    const now     = new Date();
+    return { id:`PKT-${seqHex}`, seq:n, stage, type, size, latency:parseFloat(latency),
+      enc, proto, status, devId, srcCity, dstCity, sessionId, hash,
+      ts: now.toISOString().slice(11,23),
+      tsMs: now.getTime() };
+  }
+
+  // Self-contained fake stream — 3-5 packets every 300ms
+  useEffect(() => {
+    if (paused) return;
+    const iv = setInterval(() => {
+      const burst = Math.floor(Math.random()*3)+2;
+      const newPkts = Array.from({length:burst}, genPacket);
+      setLocalPackets(prev => [...newPkts, ...prev].slice(0, 300));
+      // update throughput sparkline
+      setBpsData(prev => {
+        const totalBytes = newPkts.reduce((a,p)=>a+p.size,0);
+        const bps = Math.floor(totalBytes * (1000/300));
+        return [...prev.slice(1), { t: prev[prev.length-1].t+1, bps }];
+      });
+    }, 300);
+    return () => clearInterval(iv);
+  }, [paused]);
+
+  // Auto-scroll terminal to top (newest packets are at top)
+  useEffect(() => {
+    if (termRef.current && !paused) termRef.current.scrollTop = 0;
+  }, [localPackets]);
+
+  const allPackets = [...localPackets, ...socketPackets].slice(0,300);
+  const displayed  = filter === "ALL" ? allPackets : allPackets.filter(p=>p.type===filter||p.stage===filter);
+
+  const stats = useMemo(() => ({
+    total: allPackets.length,
+    edge:    allPackets.filter(p=>p.stage==="EDGE").length,
+    gateway: allPackets.filter(p=>p.stage==="GATEWAY").length,
+    cloud:   allPackets.filter(p=>p.stage==="CLOUD").length,
+    totalKB: (allPackets.reduce((a,p)=>a+(p.size||0),0)/1024).toFixed(1),
+    avgLat:  allPackets.length ? (allPackets.reduce((a,p)=>a+(p.latency||0),0)/allPackets.length).toFixed(2) : "0.00",
+    pps:     (allPackets.length / Math.max(1, (Date.now() - (allPackets[allPackets.length-1]?.tsMs||Date.now()))/1000)).toFixed(0)
+  }), [allPackets]);
+
+  return (
+    <div style={{ display:"grid", gap:14 }}>
+
+      {/* Metric row */}
+      <div className="metric-grid" style={{ gridTemplateColumns:"repeat(6,1fr)" }}>
+        {[
+          { label:"PACKETS",  val: allPackets.length, color: CYAN },
+          { label:"EDGE",     val: stats.edge,        color:"#00aaff" },
+          { label:"GATEWAY",  val: stats.gateway,     color: GOLD },
+          { label:"CLOUD",    val: stats.cloud,       color: GREEN },
+          { label:"AVG LAT",  val:`${stats.avgLat}ms`,color: ORANGE },
+          { label:"TOTAL KB", val:`${stats.totalKB}`, color:"#9B59B6" },
+        ].map(m => (
+          <div key={m.label} className="metric-card" style={{ padding:"10px 12px" }}>
+            <div className="metric-val" style={{ fontSize:20, color:m.color }}>{m.val}</div>
+            <div className="metric-label">{m.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Pipeline flow diagram */}
+      <div className="card">
+        <div className="card-title"><span className="dot" />End-to-End Encrypted Pipeline Flow
+          <span style={{ marginLeft:"auto", fontSize:9, color:GREEN, fontFamily:"Share Tech Mono", display:"flex", alignItems:"center", gap:4 }}>
+            <span style={{ width:6,height:6,borderRadius:"50%",background:GREEN,display:"inline-block",animation:"pulse 1s infinite" }} />
+            LIVE · {allPackets.length} PACKETS
+          </span>
+        </div>
+        <div className="pipeline-flow">
+          {[
+            { label:"EDGE LAYER",    sub:"500 IoT Devices",    enc:"AES-256-GCM", count:stats.edge, color:"#00aaff" }, null,
+            { label:"GATEWAY LAYER", sub:"PKI Auth + mTLS",   enc:"TLS 1.3",     count:stats.gateway, color:GOLD }, null,
+            { label:"CLOUD PLATFORM",sub:"Zero Trust Core",    enc:"AES-256-GCM", count:stats.cloud, color:GREEN }
+          ].map((node,i) => node ? (
+            <div key={i} className="pipeline-node active" style={{ borderColor:`${node.color}30` }}>
+              <div className="pipeline-node-title" style={{ color:node.color }}>{node.label}</div>
+              <div style={{ fontSize:10,color:"var(--dim)",marginBottom:6 }}>{node.sub}</div>
+              <div className="enc-badge" style={{ borderColor:`${node.color}40`,color:node.color }}>🔒 {node.enc}</div>
+              <div style={{ fontFamily:"Orbitron,monospace",fontSize:22,fontWeight:900,color:node.color,marginTop:8 }}>{node.count}</div>
+              <div style={{ fontSize:9,color:"var(--dim)" }}>pkts processed</div>
+            </div>
+          ) : <div key={i} className="pipeline-arrow">→</div>)}
+        </div>
+
+        {/* Throughput sparkline */}
+        <div style={{ marginTop:8 }}>
+          <div style={{ fontSize:9,color:"var(--dim)",fontFamily:"Share Tech Mono,monospace",marginBottom:4 }}>THROUGHPUT (bytes/sec)</div>
+          <ResponsiveContainer width="100%" height={50}>
+            <AreaChart data={bpsData} margin={{ top:0,right:0,bottom:0,left:0 }}>
+              <defs>
+                <linearGradient id="bpsGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%"  stopColor={CYAN} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={CYAN} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <Area type="monotone" dataKey="bps" stroke={CYAN} fill="url(#bpsGrad)" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Terminal */}
+      <div className="card" style={{ border:"1px solid rgba(0,212,255,0.15)" }}>
+        <div className="card-title" style={{ marginBottom:10 }}>
+          <span className="dot" style={{ background:CYAN }} />
+          <span style={{ color:CYAN }}>PACKET STREAM TERMINAL</span>
+          <span style={{ marginLeft:8,fontSize:9,color:paused?"var(--orange)":GREEN,fontFamily:"Share Tech Mono,monospace",display:"flex",alignItems:"center",gap:4 }}>
+            {!paused && <span style={{ width:6,height:6,borderRadius:"50%",background:GREEN,display:"inline-block",animation:"pulse 0.8s infinite" }} />}
+            {paused ? "⏸ PAUSED" : "● STREAMING"}
+          </span>
+          <div style={{ marginLeft:"auto",display:"flex",gap:6,flexWrap:"wrap" }}>
+            {["ALL","EDGE","GATEWAY","CLOUD","TELEMETRY","AUTH","ALERT"].map(f=>(
+              <button key={f} onClick={()=>setFilter(f)} className="btn btn-sm" style={{
+                background: filter===f?"rgba(0,212,255,0.15)":"transparent",
+                border:`1px solid ${filter===f?"rgba(0,212,255,0.4)":"rgba(255,255,255,0.08)"}`,
+                color: filter===f?CYAN:"var(--dim)", padding:"2px 8px"
+              }}>{f}</button>
+            ))}
+            <button onClick={()=>setPaused(p=>!p)} className="btn btn-sm" style={{ background:paused?"rgba(0,255,136,0.1)":"rgba(255,140,0,0.1)", border:`1px solid ${paused?"rgba(0,255,136,0.3)":"rgba(255,140,0,0.3)"}`, color:paused?GREEN:ORANGE, padding:"2px 10px" }}>
+              {paused?"▶ RESUME":"⏸ PAUSE"}
+            </button>
+          </div>
+        </div>
+
+        <div ref={termRef} style={{
+          background:"#030608", border:"1px solid rgba(0,212,255,0.1)", borderRadius:8,
+          padding:"10px 12px", height:320, overflowY:"auto",
+          fontFamily:"'Share Tech Mono',monospace", fontSize:11
+        }}>
+          {/* Terminal header */}
+          <div style={{ color:"#1a3a4a",marginBottom:6,borderBottom:"1px solid rgba(0,212,255,0.06)",paddingBottom:6,fontSize:10 }}>
+            ZeroTrust-OS v2.4.1 — Packet Stream Monitor — {displayed.length} packets visible
+          </div>
+          {displayed.slice(0,120).map((p,i) => {
+            const tc = typeColor[p.type] || CYAN;
+            const sc = stageColor[p.stage] || CYAN;
+            return (
+              <div key={p.id||i} style={{ lineHeight:1.9, borderBottom:"1px solid rgba(255,255,255,0.02)", paddingBottom:1,
+                animation: i < 5 ? "slideIn 0.2s ease" : "none"
+              }}>
+                <span style={{ color:"#1a3040" }}>[{p.ts||new Date().toISOString().slice(11,23)}]</span>
+                {" "}
+                <span style={{ color:sc, fontWeight:700 }}>[{p.stage||"EDGE"}]</span>
+                {" "}
+                <span style={{ color:"#4488aa" }}>{p.id||`PKT-${i}`}</span>
+                {" "}
+                <span style={{ color:tc, fontWeight:700 }}>{p.type}</span>
+                {" "}
+                <span style={{ color:"#2a5060" }}>SEQ:</span>
+                <span style={{ color:"#336677" }}>{p.seq||i}</span>
+                {"  "}
+                <span style={{ color:"#1a3040" }}>SRC:</span>
+                <span style={{ color:"#3a7090" }}>{p.devId||p.source||"DEV-UNK"}</span>
+                {" → "}
+                <span style={{ color:"#2a5060" }}>{p.dstCity||p.destination||"CLOUD-GW"}</span>
+                {"  "}
+                <span style={{ color:GREEN, opacity:0.7 }}>🔒{p.enc||"AES-256-GCM"}</span>
+                {"  "}
+                <span style={{ color:"#1a6640" }}>{p.proto||"TLS-1.3"}</span>
+                {"  "}
+                <span style={{ color:"#334455" }}>{p.size||0}B</span>
+                {"  "}
+                <span style={{ color:"#2a5544" }}>+{p.latency||0}ms</span>
+                {"  "}
+                <span style={{ color: p.status==="VERIFIED"?GREEN:p.status==="ENCRYPTED"?CYAN:p.status==="QUEUED"?ORANGE:"#4a7a8a", fontSize:10 }}>
+                  [{p.status||"PROCESSED"}]
+                </span>
+                {"  "}
+                <span style={{ color:"#112233",fontSize:10 }}>#{p.hash||"????????"}</span>
+              </div>
+            );
+          })}
+          {displayed.length === 0 && (
+            <div style={{ color:"var(--dim)",textAlign:"center",padding:40 }}>
+              <div style={{ fontFamily:"Orbitron,monospace",color:CYAN,marginBottom:8 }}>INITIALIZING STREAM...</div>
+              <div>Waiting for packet data</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Bottom row */}
+      <div className="dash-grid">
+        <div className="card">
+          <div className="card-title"><span className="dot" />Live Packet Type Distribution</div>
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart data={PKT_TYPES.map(t=>({ name:t, count:allPackets.filter(p=>p.type===t).length })).filter(d=>d.count>0)} margin={{ top:0,right:0,bottom:0,left:-20 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="name" tick={{ fill:"#4a5a6a",fontSize:8 }} />
+              <YAxis tick={{ fill:"#4a5a6a",fontSize:9 }} />
+              <Tooltip contentStyle={{ background:"#0D1235",border:"1px solid rgba(0,212,255,0.2)",fontSize:11 }} />
+              <Bar dataKey="count" radius={[4,4,0,0]} isAnimationActive={false}>
+                {PKT_TYPES.map((t,i)=><Cell key={i} fill={typeColor[t]||GOLD} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="card">
+          <div className="card-title"><span className="dot" />Encryption Protocol Coverage</div>
+          <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
+            {[
+              { label:"AES-256-GCM",       pct:58, color:GREEN   },
+              { label:"TLS 1.3",           pct:100,color:CYAN    },
+              { label:"mTLS (mutual)",      pct:89, color:GOLD    },
+              { label:"ChaCha20-Poly1305", pct:42, color:ORANGE  },
+              { label:"AES-256-CBC",       pct:31, color:"#9B59B6"},
+              { label:"DTLS 1.3",          pct:74, color:"#1abc9c"},
+            ].map(e => (
+              <div key={e.label} style={{ background:"rgba(7,11,26,0.7)",border:"1px solid rgba(255,255,255,0.05)",borderRadius:8,padding:"10px 12px" }}>
+                <div style={{ fontFamily:"Orbitron,monospace",fontSize:18,fontWeight:900,color:e.color }}>{e.pct}%</div>
+                <div style={{ fontSize:9,color:"var(--dim)",marginTop:4 }}>{e.label}</div>
+                <div className="trust-bar" style={{ marginTop:6 }}><div className="trust-bar-fill" style={{ width:`${e.pct}%`,background:e.color }} /></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+function ZeroTrustPage({ devices }) {
+  const POLICIES = [
+    { id: "POL-001", name: "Zero Trust Access Control", type: "RBAC", rule: "Deny all by default — explicit allow via policy", severity: "Critical" },
+    { id: "POL-002", name: "MFA Enforcement", type: "Auth", rule: "Require MFA when trust score < 60", severity: "High" },
+    { id: "POL-003", name: "Device Auto-Isolation", type: "Network", rule: "Isolate device on Critical threat detection", severity: "Critical" },
+    { id: "POL-004", name: "JWT Token Rotation", type: "Session", rule: "Rotate tokens every 30 seconds", severity: "Medium" },
+    { id: "POL-005", name: "X.509 Certificate Validation", type: "PKI", rule: "Block devices with expired or invalid certs", severity: "High" },
+    { id: "POL-006", name: "Behavioral Anomaly Detection", type: "AI", rule: "Flag >2σ deviation from behavior baseline", severity: "Medium" },
+    { id: "POL-007", name: "DDoS Rate Limiting", type: "Network", rule: "Block source > 1000 req/s", severity: "High" },
+    { id: "POL-008", name: "Privileged Access Management", type: "RBAC", rule: "Admin requires hardware token + MFA", severity: "Critical" },
+  ];
+
+  const SESSIONS = [
+    { id: "SES-001", user: "Admin", role: "Admin", ip: "192.168.1.100", login: "08:34:22", active: true },
+    { id: "SES-002", user: "Analyst", role: "Analyst", ip: "10.0.0.45", login: "09:12:05", active: true },
+    { id: "SES-003", user: "Manager", role: "DeviceManager", ip: "172.16.0.12", login: "07:55:30", active: false },
+  ];
+
+  const AUDIT = [
+    { event: "LOGIN_SUCCESS", user: "admin", ts: "08:34:22", detail: "Auth via X.509 + MFA" },
+    { event: "POLICY_TRIGGERED", user: "SYSTEM", ts: "08:35:10", detail: "POL-003: Device DEV-00234 isolated" },
+    { event: "TOKEN_ROTATED", user: "SYSTEM", ts: "08:35:30", detail: "JWT rotated for session SES-001" },
+    { event: "CERT_REVOKED", user: "admin", ts: "08:40:15", detail: "DEV-00089 certificate revoked" },
+    { event: "MFA_TRIGGERED", user: "SYSTEM", ts: "08:41:00", detail: "Trust score < 60 on DEV-00156" },
+    { event: "ACCESS_DENIED", user: "UNKNOWN", ts: "08:42:33", detail: "Untrusted issuer rejected at gateway" },
+    { event: "DEVICE_REGISTERED", user: "manager", ts: "09:05:18", detail: "DEV-00501 registered, cert issued" },
+    { event: "ALERT_DISPATCHED", user: "SYSTEM", ts: "09:10:45", detail: "Critical threat SOC notification sent" },
+  ];
+
+  const sevColors = { Critical: RED, High: ORANGE, Medium: GOLD, Low: "#7A8BA8" };
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div className="dash-grid">
+        <div className="metric-card"><div className="metric-val">{POLICIES.filter(p => p.severity === "Critical").length}</div><div className="metric-label">Critical Policies</div></div>
+        <div className="metric-card green"><div className="metric-val">{POLICIES.length}</div><div className="metric-label">Active Policies</div></div>
+        <div className="metric-card cyan"><div className="metric-val">{SESSIONS.filter(s => s.active).length}</div><div className="metric-label">Active Sessions</div></div>
+        <div className="metric-card"><div className="metric-val">{AUDIT.length}</div><div className="metric-label">Audit Events</div></div>
+      </div>
+
+      <div className="dash-grid">
+        <div className="card">
+          <div className="card-title"><span className="dot" />RBAC Policies</div>
+          {POLICIES.map(p => (
+            <div key={p.id} className="policy-row">
+              <div className="policy-active" />
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 11, fontWeight: 500 }}>{p.name}</div>
+                <div style={{ fontSize: 10, color: "var(--dim)", marginTop: 2 }}>{p.rule}</div>
+              </div>
+              <span style={{ fontSize: 9, fontFamily: "Orbitron, monospace", padding: "2px 6px", borderRadius: 4, background: "rgba(201,168,76,0.08)", color: "var(--gold)", border: "1px solid rgba(201,168,76,0.15)" }}>{p.type}</span>
+              <span className={`badge badge-${p.severity.toLowerCase()}`}>{p.severity}</span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div className="card">
+            <div className="card-title"><span className="dot" />Active Sessions</div>
+            {SESSIONS.map(s => (
+              <div key={s.id} className="session-row">
+                <div className="session-avatar">{s.user[0]}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, fontWeight: 500 }}>{s.user} <span style={{ fontSize: 9, color: "var(--dim)" }}>({s.role})</span></div>
+                  <div style={{ fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono" }}>IP: {s.ip} · Login: {s.login}</div>
+                </div>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: s.active ? GREEN : "var(--dim)", display: "inline-block" }} />
+                {s.active && <button className="btn btn-sm btn-red">LOGOUT</button>}
+              </div>
+            ))}
+          </div>
+
+          <div className="card">
+            <div className="card-title"><span className="dot" />Adaptive Trust State</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {[
+                { label: "Trust < 30", action: "BLOCK", count: devices.filter(d => d.trustScore < 30).length, color: RED },
+                { label: "Trust < 60", action: "MFA REQUIRED", count: devices.filter(d => d.trustScore < 60 && d.trustScore >= 30).length, color: ORANGE },
+                { label: "Trust 60-80", action: "MONITOR", count: devices.filter(d => d.trustScore >= 60 && d.trustScore < 80).length, color: GOLD },
+                { label: "Trust > 80", action: "FULL ACCESS", count: devices.filter(d => d.trustScore >= 80).length, color: GREEN },
+              ].map(item => (
+                <div key={item.label} style={{ background: "rgba(7,11,26,0.6)", border: `1px solid ${item.color}25`, borderRadius: 8, padding: 10 }}>
+                  <div style={{ fontSize: 9, color: "var(--dim)" }}>{item.label}</div>
+                  <div style={{ fontFamily: "Orbitron, monospace", fontSize: 18, color: item.color, marginTop: 2 }}>{item.count}</div>
+                  <div style={{ fontSize: 9, fontFamily: "Orbitron, monospace", color: item.color, marginTop: 2 }}>{item.action}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-title"><span className="dot" />Access Audit Log</div>
+        <table className="data-table">
+          <thead><tr><th>Event</th><th>User</th><th>Time</th><th>Detail</th></tr></thead>
+          <tbody>
+            {AUDIT.map((a, i) => (
+              <tr key={i}>
+                <td><span style={{ fontFamily: "Orbitron, monospace", fontSize: 9, color: a.event.includes("DENIED") || a.event.includes("REVOKED") ? RED : a.event.includes("SUCCESS") || a.event.includes("REGISTERED") ? GREEN : GOLD }}>{a.event}</span></td>
+                <td style={{ fontSize: 10, color: "var(--dim)" }}>{a.user}</td>
+                <td className="mono">{a.ts}</td>
+                <td style={{ fontSize: 10, color: "var(--dim)" }}>{a.detail}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ─── ANALYTICS PAGE ───────────────────────────────────────────────────────────
+function AnalyticsPage({ devices, threats, stats }) {
+  const strideData = [
+    { subject: "Spoofing", A: 82 }, { subject: "Tampering", A: 67 },
+    { subject: "Repudiation", A: 55 }, { subject: "Info Disclosure", A: 73 },
+    { subject: "Denial of Service", A: 88 }, { subject: "Elevation of Privilege", A: 61 }
+  ];
+
+  const trustTrend = useMemo(() => Array.from({ length: 30 }, (_, i) => ({
+    day: `D-${30 - i}`, score: Math.floor(Math.random() * 15 + 78),
+    min: Math.floor(Math.random() * 10 + 60), max: Math.floor(Math.random() * 10 + 88)
+  })), []);
+
+  const topAttacked = useMemo(() => {
+    const counts = {};
+    threats.forEach(t => counts[t.sourceDevice] = (counts[t.sourceDevice] || 0) + 1);
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([id, count]) => ({ id, count }));
+  }, [threats]);
+
+  const predictRisk = useMemo(() => Array.from({ length: 12 }, (_, i) => ({
+    h: `+${(i + 1) * 2}h`,
+    predicted: Math.floor(Math.random() * 20 + 20),
+    actual: i < 6 ? Math.floor(Math.random() * 20 + 22) : null,
+    upper: Math.floor(Math.random() * 20 + 35),
+    lower: Math.floor(Math.random() * 10 + 12)
+  })), []);
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div className="metric-grid">
+        <div className="metric-card green"><div className="metric-val">98.6%</div><div className="metric-label">Attack Prevention</div><div className="metric-sub">↑ 0.3% vs last week</div></div>
+        <div className="metric-card cyan"><div className="metric-val">&lt;10ms</div><div className="metric-label">Auth Latency</div><div className="metric-sub">P99: 8.4ms</div></div>
+        <div className="metric-card"><div className="metric-val">500</div><div className="metric-label">Devices Authenticated</div><div className="metric-sub">All verified on boot</div></div>
+        <div className="metric-card"><div className="metric-val">96.3%</div><div className="metric-label">IDS Accuracy</div><div className="metric-sub">4 models in ensemble</div></div>
+      </div>
+
+      <div className="dash-grid">
+        {/* STRIDE Radar */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />STRIDE Threat Radar</div>
+          <ResponsiveContainer width="100%" height={260}>
+            <RadarChart data={strideData} cx="50%" cy="50%" outerRadius={90}>
+              <PolarGrid stroke="rgba(201,168,76,0.1)" />
+              <PolarAngleAxis dataKey="subject" tick={{ fill: "#7A8BA8", fontSize: 10 }} />
+              <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fill: "#4a5a6a", fontSize: 8 }} />
+              <Radar name="Threat Score" dataKey="A" stroke={RED} fill={RED} fillOpacity={0.2} strokeWidth={2} />
+              <Tooltip contentStyle={{ background: "#0D1235", border: "1px solid rgba(201,168,76,0.2)", fontSize: 11 }} />
+            </RadarChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Trust trend */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />Trust Score Evolution (30-Day)</div>
+          <ResponsiveContainer width="100%" height={260}>
+            <AreaChart data={trustTrend}>
+              <defs>
+                <linearGradient id="tg2" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={GOLD} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={GOLD} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="day" tick={{ fill: "#4a5a6a", fontSize: 8 }} interval={4} />
+              <YAxis domain={[50, 100]} tick={{ fill: "#4a5a6a", fontSize: 8 }} />
+              <Tooltip contentStyle={{ background: "#0D1235", border: "1px solid rgba(201,168,76,0.2)", fontSize: 11 }} />
+              <Area type="monotone" dataKey="score" stroke={GOLD} fill="url(#tg2)" strokeWidth={2} name="Avg Trust" />
+              <Line type="monotone" dataKey="min" stroke={RED} strokeWidth={1} strokeDasharray="2 2" dot={false} name="Min" />
+              <Line type="monotone" dataKey="max" stroke={GREEN} strokeWidth={1} strokeDasharray="2 2" dot={false} name="Max" />
+              <Legend wrapperStyle={{ fontSize: 10 }} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="dash-grid">
+        {/* Top attacked */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />Top Attacked Devices</div>
+          {topAttacked.length === 0 ? (
+            <div style={{ color: "var(--dim)", fontSize: 11, textAlign: "center", padding: 20 }}>Monitoring for attacks...</div>
+          ) : (
+            <div>
+              {topAttacked.map((d, i) => (
+                <div key={d.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                  <span style={{ fontFamily: "Orbitron, monospace", fontSize: 11, color: "var(--dim)", width: 20 }}>#{i + 1}</span>
+                  <span className="mono" style={{ flex: 1 }}>{d.id}</span>
+                  <div className="trust-bar" style={{ width: 80 }}><div className="trust-bar-fill" style={{ width: `${Math.min(100, d.count * 10)}%`, background: RED }} /></div>
+                  <span style={{ fontFamily: "Orbitron, monospace", fontSize: 11, color: RED, width: 30, textAlign: "right" }}>{d.count}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Predictive risk */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />Predictive Security Intelligence</div>
+          <div style={{ fontSize: 10, color: "var(--dim)", marginBottom: 12 }}>AI-predicted system risk level for next 24 hours</div>
+          <ResponsiveContainer width="100%" height={180}>
+            <AreaChart data={predictRisk}>
+              <defs>
+                <linearGradient id="pg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={CYAN} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={CYAN} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="h" tick={{ fill: "#4a5a6a", fontSize: 9 }} />
+              <YAxis tick={{ fill: "#4a5a6a", fontSize: 9 }} domain={[0, 60]} />
+              <Tooltip contentStyle={{ background: "#0D1235", border: "1px solid rgba(201,168,76,0.2)", fontSize: 11 }} />
+              <Area type="monotone" dataKey="predicted" stroke={CYAN} fill="url(#pg)" strokeWidth={2} name="Predicted Risk" strokeDasharray="5 5" />
+              <Area type="monotone" dataKey="actual" stroke={GOLD} fill="none" strokeWidth={2} name="Actual Risk" />
+              <Legend wrapperStyle={{ fontSize: 10 }} />
+            </AreaChart>
+          </ResponsiveContainer>
+          <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+            {[
+              { label: "Risk Level", val: "MEDIUM", color: ORANGE },
+              { label: "Confidence", val: "87.3%", color: GREEN },
+              { label: "Model", val: "LSTM+RF", color: CYAN },
+            ].map(m => (
+              <div key={m.label} style={{ flex: 1, background: "rgba(7,11,26,0.6)", borderRadius: 6, padding: 8, textAlign: "center" }}>
+                <div style={{ fontSize: 9, color: "var(--dim)" }}>{m.label}</div>
+                <div style={{ fontFamily: "Orbitron, monospace", fontSize: 12, color: m.color, marginTop: 2 }}>{m.val}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* IDS Models */}
+      <div className="card">
+        <div className="card-title"><span className="dot" />IDS Model Performance</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12 }}>
+          {[
+            { name: "Random Forest", acc: 96.3, status: "Active", type: "Classification" },
+            { name: "LSTM Sequence", acc: 94.7, status: "Active", type: "Temporal" },
+            { name: "Isolation Forest", acc: 92.1, status: "Active", type: "Anomaly" },
+            { name: "Autoencoder AE", acc: 91.8, status: "Training", type: "Deep Learning" },
+          ].map(m => (
+            <div key={m.name} style={{ background: "rgba(7,11,26,0.6)", border: "1px solid rgba(201,168,76,0.12)", borderRadius: 10, padding: 14 }}>
+              <div style={{ fontSize: 10, fontFamily: "Orbitron, monospace", color: "var(--gold)", marginBottom: 4 }}>{m.name}</div>
+              <div style={{ fontFamily: "Orbitron, monospace", fontSize: 24, fontWeight: 900, color: m.acc > 94 ? GREEN : m.acc > 92 ? GOLD : ORANGE }}>{m.acc}%</div>
+              <div style={{ fontSize: 9, color: "var(--dim)", margin: "4px 0" }}>{m.type}</div>
+              <span style={{ fontSize: 9, fontFamily: "Orbitron, monospace", padding: "2px 6px", borderRadius: 4, background: m.status === "Active" ? "rgba(0,255,136,0.1)" : "rgba(201,168,76,0.1)", color: m.status === "Active" ? GREEN : GOLD, border: `1px solid ${m.status === "Active" ? "rgba(0,255,136,0.25)" : "rgba(201,168,76,0.25)"}` }}>{m.status}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── BLOCKCHAIN PAGE ──────────────────────────────────────────────────────────
+function BlockchainPage({ devices }) {
+  const blocks = useMemo(() => {
+    const arr = [{ blockNumber: 0, deviceId: "GENESIS", hash: "0000000000000000a4b2c3d4e5f60000", previousHash: "0".repeat(32), timestamp: new Date(Date.now() - 30 * 86400000).toISOString(), data: { action: "INIT" }, nonce: 0 }];
+    const devArr = Array.from(devices).slice(0, 19);
+    devArr.forEach((d, i) => {
+      arr.push({
+        blockNumber: i + 1,
+        deviceId: d.id,
+        hash: d.blockchainHash || Array.from({ length: 16 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, "0")).join(""),
+        previousHash: arr[arr.length - 1].hash,
+        timestamp: d.registeredAt || new Date(Date.now() - (19 - i) * 86400000).toISOString(),
+        data: { action: "REGISTER", trustScore: d.trustScore, certFingerprint: d.certificate?.serial },
+        nonce: Math.floor(Math.random() * 100000)
+      });
+    });
+    return arr;
+  }, [devices]);
+
+  const [selected, setSelected] = useState(null);
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div className="metric-grid">
+        <div className="metric-card"><div className="metric-val">{blocks.length}</div><div className="metric-label">Total Blocks</div></div>
+        <div className="metric-card green"><div className="metric-val">✓</div><div className="metric-label">Chain Valid</div></div>
+        <div className="metric-card cyan"><div className="metric-val">{devices.length}</div><div className="metric-label">Identities Hashed</div></div>
+        <div className="metric-card"><div className="metric-val">SHA-256</div><div className="metric-label">Hash Algorithm</div></div>
+      </div>
+
+      <div className="card">
+        <div className="card-title"><span className="dot" />Blockchain Device Identity Ledger (Latest 20 Blocks)</div>
+        <div className="block-chain">
+          {blocks.map((b, i) => (
+            <div key={b.blockNumber} style={{ display: "flex", alignItems: "center" }}>
+              {i > 0 && <div className="block-connector">⛓</div>}
+              <div className={`block-item ${b.blockNumber === 0 ? "genesis" : ""}`} onClick={() => setSelected(b)} style={{ cursor: "pointer", borderColor: selected?.blockNumber === b.blockNumber ? "rgba(201,168,76,0.6)" : "" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div className="block-num">BLOCK #{b.blockNumber}</div>
+                  {b.blockNumber === 0 && <span style={{ fontSize: 8, fontFamily: "Orbitron, monospace", color: CYAN, background: "rgba(0,212,255,0.1)", padding: "1px 5px", borderRadius: 3 }}>GENESIS</span>}
+                </div>
+                <div style={{ fontSize: 10, color: "var(--dim)", marginTop: 4 }}>{b.blockNumber === 0 ? "GENESIS BLOCK" : b.deviceId}</div>
+                <div className="block-hash">{b.hash?.slice(0, 24)}...</div>
+                <div style={{ fontSize: 9, color: "#2a3a4a", marginTop: 4, fontFamily: "Share Tech Mono" }}>{new Date(b.timestamp).toLocaleDateString()}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {selected && (
+        <div className="card" style={{ borderColor: "rgba(201,168,76,0.4)" }}>
+          <div className="card-title"><span className="dot" />Block #{selected.blockNumber} — Detail View</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            {[
+              { label: "Block Number", val: selected.blockNumber },
+              { label: "Device ID", val: selected.deviceId },
+              { label: "Timestamp", val: new Date(selected.timestamp).toISOString() },
+              { label: "Nonce", val: selected.nonce },
+              { label: "Hash", val: selected.hash },
+              { label: "Previous Hash", val: selected.previousHash },
+              { label: "Action", val: selected.data?.action || "REGISTER" },
+              { label: "Trust Score", val: selected.data?.trustScore || "N/A" },
+            ].map(f => (
+              <div key={f.label}>
+                <div style={{ fontSize: 9, color: "var(--dim)", fontFamily: "Orbitron, monospace", letterSpacing: 1, marginBottom: 3 }}>{f.label}</div>
+                <div style={{ fontFamily: "Share Tech Mono", fontSize: 11, color: "var(--cyan)", wordBreak: "break-all" }}>{String(f.val)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="card-title"><span className="dot" />Full Ledger Table</div>
+        <div className="table-wrap">
+          <table className="data-table">
+            <thead><tr><th>#</th><th>Device ID</th><th>Hash</th><th>Previous Hash</th><th>Action</th><th>Timestamp</th></tr></thead>
+            <tbody>
+              {[...blocks].reverse().map(b => (
+                <tr key={b.blockNumber}>
+                  <td style={{ fontFamily: "Orbitron, monospace", color: GOLD }}>{b.blockNumber}</td>
+                  <td className="mono">{b.deviceId}</td>
+                  <td className="mono">{b.hash?.slice(0, 16)}...</td>
+                  <td className="mono">{b.previousHash?.slice(0, 16)}...</td>
+                  <td><span style={{ fontFamily: "Orbitron, monospace", fontSize: 9, color: GREEN }}>{b.data?.action || "INIT"}</span></td>
+                  <td style={{ fontSize: 9, color: "var(--dim)", fontFamily: "Share Tech Mono" }}>{new Date(b.timestamp).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── BUSINESS PAGE ────────────────────────────────────────────────────────────
+function BusinessPage() {
+  const plans = [
+    { name: "Starter", price: "₹15,000", period: "/month", features: ["Up to 50 edge devices", "Basic threat monitoring", "Email alerts", "Standard SLA 99.5%", "Community support"], color: CYAN, featured: false },
+    { name: "Professional", price: "₹40,000", period: "/month", features: ["Up to 500 edge devices", "AI threat intelligence", "Real-time SOC dashboard", "Zero Trust policies", "API access", "SLA 99.9%", "24/7 support"], color: GOLD, featured: true },
+    { name: "Enterprise", price: "₹80,000", period: "/month", features: ["Unlimited devices", "Full AI + ML engine", "Blockchain ledger", "Custom RBAC", "On-premise option", "SLA 99.99%", "Dedicated engineer"], color: GREEN, featured: false },
+  ];
+
+  const costs = [
+    { name: "Cloud Infrastructure", value: 200000, fill: CYAN },
+    { name: "Development", value: 300000, fill: GOLD },
+    { name: "Security Tools", value: 100000, fill: RED },
+    { name: "Operations", value: 80000, fill: ORANGE },
+    { name: "Support", value: 60000, fill: GREEN },
+  ];
+
+  const segments = [
+    { icon: "🏙️", name: "Smart Cities", desc: "Traffic sensors, surveillance, utilities, emergency systems", arr: "₹45L ARR" },
+    { icon: "🏥", name: "Hospitals & Healthcare", desc: "Medical IoT, patient monitoring, drug dispensing security", arr: "₹38L ARR" },
+    { icon: "🏭", name: "Industrial IoT", desc: "SCADA systems, factory automation, supply chain tracking", arr: "₹72L ARR" },
+    { icon: "🛡️", name: "Defense & Government", desc: "Critical infrastructure protection, classified network security", arr: "₹95L ARR" },
+    { icon: "⚡", name: "Energy & Utilities", desc: "Smart grid protection, power plant monitoring, renewable assets", arr: "₹52L ARR" },
+    { icon: "🚗", name: "Automotive & Transport", desc: "Connected vehicles, fleet management, port logistics", arr: "₹33L ARR" },
+  ];
+
+  const revenueData = Array.from({ length: 12 }, (_, i) => ({
+    month: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][i],
+    revenue: Math.floor(Math.random() * 500000 + 500000 * (i / 12 + 0.5)),
+    customers: Math.floor(Math.random() * 5 + i * 2 + 8)
+  }));
+
+  return (
+    <div style={{ display: "grid", gap: 14 }}>
+      <div className="metric-grid">
+        <div className="metric-card green"><div className="metric-val">₹3.35Cr</div><div className="metric-label">Total ARR</div><div className="metric-sub">↑ 42% YoY growth</div></div>
+        <div className="metric-card cyan"><div className="metric-val">47</div><div className="metric-label">Enterprise Clients</div><div className="metric-sub">6 verticals covered</div></div>
+        <div className="metric-card"><div className="metric-val">₹7.4L</div><div className="metric-label">Dev Cost Total</div><div className="metric-sub">Infra + Dev + Security</div></div>
+        <div className="metric-card"><div className="metric-val">18mo</div><div className="metric-label">Payback Period</div><div className="metric-sub">Unit economics positive</div></div>
+      </div>
+
+      {/* Pricing */}
+      <div className="card">
+        <div className="card-title"><span className="dot" />SaaS Pricing Model</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
+          {plans.map(p => (
+            <div key={p.name} className={`price-card ${p.featured ? "featured" : ""}`}>
+              {p.featured && <div style={{ fontSize: 9, fontFamily: "Orbitron, monospace", color: GOLD, background: "rgba(201,168,76,0.1)", border: "1px solid rgba(201,168,76,0.3)", borderRadius: 4, padding: "3px 10px", display: "inline-block", marginBottom: 8 }}>MOST POPULAR</div>}
+              <div style={{ fontFamily: "Orbitron, monospace", fontSize: 14, color: p.color, marginBottom: 6 }}>{p.name}</div>
+              <div><span className="price-tag" style={{ color: p.color }}>{p.price}</span><span className="price-period">{p.period}</span></div>
+              <div style={{ height: 1, background: "rgba(255,255,255,0.05)", margin: "16px 0" }} />
+              {p.features.map(f => <div key={f} className="price-feature">{f}</div>)}
+              <button className="btn" style={{ width: "100%", justifyContent: "center", marginTop: 16, background: `rgba(${p.color === GOLD ? "201,168,76" : p.color === CYAN ? "0,212,255" : "0,255,136"},0.1)`, color: p.color, border: `1px solid ${p.color}40` }}>
+                GET STARTED
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="dash-grid">
+        {/* Cost breakdown */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />Cost Model Breakdown</div>
+          <ResponsiveContainer width="100%" height={200}>
+            <PieChart>
+              <Pie data={costs} cx="50%" cy="50%" outerRadius={75} dataKey="value" label={({ name, value }) => `${name.split(" ")[0]} ₹${(value / 100000).toFixed(0)}L`} labelLine={false} fontSize={9}>
+                {costs.map((e, i) => <Cell key={i} fill={e.fill} />)}
+              </Pie>
+              <Tooltip formatter={(v) => `₹${(v / 100000).toFixed(1)}L`} contentStyle={{ background: "#0D1235", border: "1px solid rgba(201,168,76,0.2)", fontSize: 11 }} />
+            </PieChart>
+          </ResponsiveContainer>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "center" }}>
+            {costs.map(c => (
+              <div key={c.name} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 9 }}>
+                <div style={{ width: 8, height: 8, borderRadius: 2, background: c.fill }} />
+                <span style={{ color: "var(--dim)" }}>{c.name}: </span>
+                <span style={{ color: c.fill, fontFamily: "Orbitron, monospace" }}>₹{(c.value / 100000).toFixed(0)}L</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Revenue trend */}
+        <div className="card">
+          <div className="card-title"><span className="dot" />Revenue Projection</div>
+          <ResponsiveContainer width="100%" height={240}>
+            <AreaChart data={revenueData}>
+              <defs>
+                <linearGradient id="rg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={GREEN} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={GREEN} stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
+              <XAxis dataKey="month" tick={{ fill: "#4a5a6a", fontSize: 9 }} />
+              <YAxis tick={{ fill: "#4a5a6a", fontSize: 9 }} tickFormatter={v => `₹${(v / 100000).toFixed(0)}L`} />
+              <Tooltip formatter={(v, n) => n === "revenue" ? `₹${(v / 100000).toFixed(1)}L` : v} contentStyle={{ background: "#0D1235", border: "1px solid rgba(201,168,76,0.2)", fontSize: 11 }} />
+              <Area type="monotone" dataKey="revenue" stroke={GREEN} fill="url(#rg)" strokeWidth={2} name="Revenue" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      {/* Customer segments */}
+      <div className="card">
+        <div className="card-title"><span className="dot" />Target Customer Segments</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+          {segments.map(s => (
+            <div key={s.name} className="segment-card">
+              <div className="segment-icon">{s.icon}</div>
+              <div className="segment-name">{s.name}</div>
+              <div className="segment-desc">{s.desc}</div>
+              <div style={{ marginTop: 10, fontFamily: "Orbitron, monospace", fontSize: 12, color: GREEN }}>{s.arr}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── AI COMMAND SIDEBAR ────────────────────────────────────────────────────────
+const AI_RESPONSES = {
+  // Security questions
+  "threat":        (d,t,s) => `Currently monitoring ${t.length} threats across ${s.total} nodes. ${t.filter(x=>x.severity==="Critical").length} critical threats detected. Top attack vector: ${t[0]?.type||"None"}. Auto-response active on all High+ severity events.`,
+  "node":          (d,t,s) => `${s.total} nodes registered globally. ${s.verified} verified (${Math.round(s.verified/s.total*100)}%), ${s.suspicious} suspicious, ${s.blocked} blocked, ${s.isolated} isolated. Average trust score: ${s.avgTrust}/100.`,
+  "trust":         (d,t,s) => `Average trust score: ${s.avgTrust}/100. ${d.filter(x=>x.trustScore<40).length} nodes below critical threshold (40). Recommendation: Rotate certificates on low-trust nodes immediately.`,
+  "attack":        (d,t,s) => `Top attack types: ${[...new Set(t.map(x=>x.type))].slice(0,3).join(", ")}. ${t.filter(x=>x.severity==="Critical").length} critical, ${t.filter(x=>x.severity==="High").length} high severity. Zero Trust policy blocking ${s.blocked} nodes.`,
+  "encrypt":       ()      => `All 500 nodes use AES-256-GCM for storage and TLS 1.3 for transit. Certificate authority: ZeroTrust-CA. mTLS enforced on all gateway connections. 100% encryption coverage achieved.`,
+  "certificate":   (d)     => `${d.filter(x=>x.certificate?.valid).length} valid certificates, ${d.filter(x=>!x.certificate?.valid).length} revoked. Issuer: ZeroTrust-CA. All certificates use 4096-bit RSA keys with SHA-256 signatures.`,
+  "recommend":     (d,t,s) => `AI Recommendations: 1) Isolate ${d.filter(x=>x.trustScore<20).length} critically low-trust nodes. 2) Rotate keys on ${d.filter(x=>x.status==="Suspicious").length} suspicious nodes. 3) Increase monitoring on ${[...new Set(d.filter(x=>x.status!=="Verified").map(x=>x.location?.city))].slice(0,3).join(", ")} regions.`,
+  "status":        (d,t,s) => `System Status: OPERATIONAL. Uptime: 99.97%. Threat detection: ACTIVE. Zero Trust policies: ENFORCED. ${s.total} nodes online, ${t.length} threats logged in session. SOC response time: <10ms.`,
+  "block":         ()      => `To block a node, use the Controller tab → select node ID → click BLOCK NODE. This revokes its certificate, drops all active sessions, and flags it in the audit ledger.`,
+  "isolate":       ()      => `Node isolation severs all network connections while preserving forensic data. The node remains visible on the map but cannot communicate. Use Controller tab to isolate specific nodes.`,
+  "help":          ()      => `Available commands: status, threat, node, trust, attack, encrypt, certificate, recommend, block, isolate. Or ask anything about your Zero Trust infrastructure!`,
+  "hello":         (d,t,s,u) => `Hello, ${u||"Commander"}! Zero Trust AI online. ${s.total} nodes active, ${t.filter(x=>x.severity==="Critical").length} critical threats. How can I assist you today?`,
+  "predict":       (d,t,s) => `Threat Prediction (next 60 min): HIGH risk of DDoS surge (87% confidence). ${d.filter(x=>x.status==="Suspicious").length} suspicious nodes likely to escalate. Recommend pre-emptive isolation of nodes with trust score < 35.`,
+  "performance":   ()      => `Pipeline latency: <10ms avg. Packet throughput: ~2,400 pkts/sec. Encryption overhead: 0.3ms. Gateway auth: 4.2ms avg. Overall system efficiency: 98.6%`,
+  "ddos":          ()      => `DDoS mitigation: Active rate limiting at 1M req/sec threshold. Geo-blocking enabled for 12 regions. CloudFlare relay active. Auto-scaling triggered when traffic exceeds 80% capacity.`,
+  "policy":        ()      => `Active Zero Trust Policies: 1) Never trust, always verify. 2) Least-privilege access enforced. 3) Micro-segmentation on all 15 regions. 4) Continuous authentication every 300s. 5) All lateral movement blocked.`,
+  "default":       ()      => `Query understood. Analyzing Zero Trust telemetry... Based on current threat posture and device health metrics, I recommend reviewing the SOC dashboard. Type 'help' for available AI commands.`
+};
+
+function getAIResponse(input, devices, threats, stats, user) {
+  const q = input.toLowerCase();
+  for (const [key, fn] of Object.entries(AI_RESPONSES)) {
+    if (q.includes(key)) return fn(devices, threats, stats, user?.name);
+  }
+  // Check for device ID mention
+  const devMatch = input.match(/DEV-[A-Z]{3}-\d{5}/i);
+  if (devMatch) {
+    const dev = devices.find(d => d.id?.toUpperCase() === devMatch[0].toUpperCase() || d.deviceId?.toUpperCase() === devMatch[0].toUpperCase());
+    if (dev) return `Device ${dev.id}: Status=${dev.status}, Trust=${dev.trustScore}/100, Type=${dev.type}, Location=${dev.location?.city} ${dev.location?.country}, Cert=${dev.certificate?.valid?"VALID":"REVOKED"}, Issuer=${dev.certificate?.issuer}`;
+  }
+  return AI_RESPONSES.default();
+}
+
+function AISidebar({ devices, setDevices, threats, stats, onClose }) {
+  const [tab, setTab]         = useState("helper");
+  const [messages, setMessages] = useState([
+    { role:"ai", text:"🤖 Zero Trust AI online. I can answer questions, predict threats, and control nodes. What do you need?" }
+  ]);
+  const [input, setInput]     = useState("");
+  const [typing, setTyping]   = useState(false);
+  const [cmdNode, setCmdNode] = useState("");
+  const [cmdResult, setCmdResult] = useState(null);
+  const [predRefresh, setPredRefresh] = useState(0);
+  const chatRef = useRef(null);
+
+  useEffect(() => { if(chatRef.current) chatRef.current.scrollTop = chatRef.current.scrollHeight; }, [messages]);
+
+  const sendMsg = () => {
+    if(!input.trim()) return;
+    const userMsg = input.trim();
+    setInput("");
+    setMessages(prev => [...prev, { role:"user", text:userMsg }]);
+    setTyping(true);
+    setTimeout(() => {
+      const resp = getAIResponse(userMsg, devices, threats, stats);
+      setMessages(prev => [...prev, { role:"ai", text:resp }]);
+      setTyping(false);
+    }, 800 + Math.random()*600);
+  };
+
+  const executeCmd = (action) => {
+    if (!cmdNode.trim()) { setCmdResult({ ok:false, msg:"Enter a Device ID first" }); return; }
+    const id = cmdNode.trim().toUpperCase();
+    const dev = devices.find(d => (d.id||d.deviceId||"").toUpperCase() === id);
+    if (!dev) { setCmdResult({ ok:false, msg:`Device ${id} not found in registry` }); return; }
+
+    let newStatus = dev.status, newTrust = dev.trustScore, msg = "";
+    switch(action) {
+      case "DISABLE":   newStatus="Blocked";   newTrust=0;   msg=`Node ${id} DISABLED — all sessions terminated, certificate revoked`; break;
+      case "ISOLATE":   newStatus="Isolated";  newTrust=Math.min(dev.trustScore,20); msg=`Node ${id} ISOLATED — network access severed, forensic mode active`; break;
+      case "QUARANTINE":newStatus="Blocked";   newTrust=5;   msg=`Node ${id} QUARANTINED — moved to restricted VLAN, keys invalidated`; break;
+      case "RESTORE":   newStatus="Verified";  newTrust=75;  msg=`Node ${id} RESTORED — certificate renewed, trust score reset to 75`; break;
+      case "ROTATE":    newTrust=Math.min(100,dev.trustScore+15); msg=`Node ${id} KEY ROTATED — new X.509 cert issued, trust score +15`; break;
+      case "SCAN":      msg=`Node ${id} DEEP SCAN complete — ${Math.random()<0.3?"Anomaly detected: unusual outbound traffic":"No anomalies found. System clean."}. Trust score: ${dev.trustScore}/100`; break;
+    }
+    setDevices(prev => prev.map(d =>
+      (d.id||d.deviceId||"").toUpperCase()===id ? {...d, status:newStatus, trustScore:newTrust, lastSeen:new Date().toISOString()} : d
+    ));
+    setCmdResult({ ok:true, msg });
+    setMessages(prev=>[...prev,
+      {role:"user", text:`AI CMD: ${action} ${id}`},
+      {role:"ai",   text:`⚡ Executed: ${msg}`}
+    ]);
+  };
+
+  const critNodes = devices.filter(d=>d.trustScore<30).slice(0,5);
+  const susNodes  = devices.filter(d=>d.status==="Suspicious").slice(0,5);
+  const threatTypes = [...new Set(threats.map(t=>t.type))];
+
+  return (
+    <div style={{
+      position:"fixed", right:0, top:0, bottom:0, width:380,
+      background:"linear-gradient(180deg,#060A18 0%,#0a0f20 100%)",
+      borderLeft:"1px solid rgba(0,212,255,0.2)",
+      display:"flex", flexDirection:"column", zIndex:500,
+      boxShadow:"-8px 0 40px rgba(0,0,0,0.6)",
+      animation:"slideInRight 0.25s ease"
+    }}>
+      <style>{`
+        @keyframes slideInRight { from { transform:translateX(100%); opacity:0; } to { transform:translateX(0); opacity:1; } }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+        .ai-msg-user { background:rgba(201,168,76,0.08); border:1px solid rgba(201,168,76,0.15); border-radius:10px 10px 2px 10px; padding:8px 12px; margin-bottom:8px; font-size:12px; color:var(--white); align-self:flex-end; max-width:90%; }
+        .ai-msg-ai   { background:rgba(0,212,255,0.06); border:1px solid rgba(0,212,255,0.15); border-radius:2px 10px 10px 10px; padding:8px 12px; margin-bottom:8px; font-size:12px; color:#c8dff0; align-self:flex-start; max-width:95%; line-height:1.6; }
+        .ai-cmd-btn  { padding:6px 10px; border-radius:6px; border:none; cursor:pointer; font-family:"Orbitron",monospace; font-size:9px; font-weight:700; letter-spacing:0.5px; transition:all 0.2s; }
+      `}</style>
+
+      {/* Header */}
+      <div style={{ padding:"14px 16px", borderBottom:"1px solid rgba(0,212,255,0.12)", display:"flex", alignItems:"center", gap:10, flexShrink:0 }}>
+        <div style={{ width:36, height:36, borderRadius:10, background:"linear-gradient(135deg,rgba(0,212,255,0.2),rgba(0,212,255,0.05))", border:"1px solid rgba(0,212,255,0.3)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 }}>🤖</div>
+        <div>
+          <div style={{ fontFamily:"Orbitron,monospace", fontSize:11, fontWeight:700, color:"var(--cyan)" }}>SOVEREIGN AI</div>
+          <div style={{ fontSize:9, color:"var(--dim)", fontFamily:"Share Tech Mono,monospace" }}>Controller · Predictor · Helper</div>
+        </div>
+        <div style={{ marginLeft:"auto", display:"flex", alignItems:"center", gap:6 }}>
+          <span style={{ width:6,height:6,borderRadius:"50%",background:"var(--green)",boxShadow:"0 0 6px var(--green)",animation:"pulse 2s infinite" }} />
+          <span style={{ fontSize:9,color:"var(--green)",fontFamily:"Share Tech Mono,monospace" }}>ONLINE</span>
+          <button onClick={onClose} style={{ marginLeft:8,background:"transparent",border:"1px solid rgba(255,255,255,0.1)",borderRadius:6,color:"var(--dim)",cursor:"pointer",padding:"4px 8px",fontSize:11 }}>✕</button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display:"flex", borderBottom:"1px solid rgba(0,212,255,0.1)", flexShrink:0 }}>
+        {[["helper","💬 HELPER"],["controller","⚡ CONTROLLER"],["predictor","🔮 PREDICTOR"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setTab(id)} style={{ flex:1, padding:"10px 4px", background:tab===id?"rgba(0,212,255,0.08)":"transparent", border:"none", borderBottom:tab===id?"2px solid var(--cyan)":"2px solid transparent", color:tab===id?"var(--cyan)":"var(--dim)", fontFamily:"Orbitron,monospace", fontSize:"8.5px", letterSpacing:.5, cursor:"pointer", fontWeight:700 }}>{label}</button>
+        ))}
+      </div>
+
+      {/* ── HELPER TAB ── */}
+      {tab==="helper" && (
+        <div style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden" }}>
+          <div ref={chatRef} style={{ flex:1, overflowY:"auto", padding:"12px 14px", display:"flex", flexDirection:"column" }}>
+            {messages.map((m,i)=>(
+              <div key={i} className={m.role==="user"?"ai-msg-user":"ai-msg-ai"}>
+                {m.role==="ai" && <span style={{ fontSize:9,color:"var(--cyan)",fontFamily:"Orbitron,monospace",display:"block",marginBottom:4 }}>🤖 SOVEREIGN AI</span>}
+                {m.text}
+              </div>
+            ))}
+            {typing && (
+              <div className="ai-msg-ai">
+                <span style={{ fontSize:9,color:"var(--cyan)",fontFamily:"Orbitron,monospace",display:"block",marginBottom:4 }}>🤖 SOVEREIGN AI</span>
+                <span style={{ animation:"blink 0.8s infinite" }}>▋</span> Analyzing...
+              </div>
+            )}
+          </div>
+          {/* Quick prompts */}
+          <div style={{ padding:"8px 14px", borderTop:"1px solid rgba(255,255,255,0.04)", display:"flex", gap:4, flexWrap:"wrap" }}>
+            {["status","threat","recommend","predict","performance"].map(p=>(
+              <button key={p} onClick={()=>{ setInput(p); }} style={{ padding:"3px 8px",border:"1px solid rgba(0,212,255,0.2)",background:"rgba(0,212,255,0.05)",borderRadius:4,color:"var(--cyan)",fontSize:9,fontFamily:"Share Tech Mono,monospace",cursor:"pointer" }}>{p}</button>
+            ))}
+          </div>
+          <div style={{ padding:"10px 14px", borderTop:"1px solid rgba(0,212,255,0.1)", display:"flex", gap:8 }}>
+            <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&sendMsg()} placeholder="Ask me anything..." style={{ flex:1,background:"rgba(7,11,26,0.8)",border:"1px solid rgba(0,212,255,0.2)",borderRadius:8,color:"var(--white)",padding:"8px 12px",fontSize:12,fontFamily:"Inter,sans-serif",outline:"none" }} />
+            <button onClick={sendMsg} style={{ padding:"8px 14px",background:"linear-gradient(135deg,rgba(0,212,255,0.2),rgba(0,212,255,0.1))",border:"1px solid rgba(0,212,255,0.4)",borderRadius:8,color:"var(--cyan)",cursor:"pointer",fontFamily:"Orbitron,monospace",fontSize:10,fontWeight:700 }}>SEND</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── CONTROLLER TAB ── */}
+      {tab==="controller" && (
+        <div style={{ flex:1, overflowY:"auto", padding:"14px" }}>
+          <div style={{ fontSize:10,color:"var(--dim)",fontFamily:"Share Tech Mono,monospace",marginBottom:12 }}>Enter a Device ID to execute AI-powered control commands</div>
+
+          <div style={{ marginBottom:12 }}>
+            <input value={cmdNode} onChange={e=>setCmdNode(e.target.value)} placeholder="e.g. DEV-MUM-00042" style={{ width:"100%",background:"rgba(7,11,26,0.8)",border:"1px solid rgba(0,212,255,0.2)",borderRadius:8,color:"var(--cyan)",padding:"9px 12px",fontSize:12,fontFamily:"Share Tech Mono,monospace",outline:"none",boxSizing:"border-box" }} />
+          </div>
+
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:14 }}>
+            {[
+              { action:"DISABLE",    label:"🔴 DISABLE",    color:"#FF3B3B", bg:"rgba(255,59,59,0.1)"  },
+              { action:"ISOLATE",    label:"🔵 ISOLATE",    color:"#00D4FF", bg:"rgba(0,212,255,0.1)"  },
+              { action:"QUARANTINE", label:"🟠 QUARANTINE", color:"#FF8C00", bg:"rgba(255,140,0,0.1)"  },
+              { action:"RESTORE",    label:"🟢 RESTORE",    color:"#00FF88", bg:"rgba(0,255,136,0.1)"  },
+              { action:"ROTATE",     label:"🔑 ROTATE KEY", color:"#C9A84C", bg:"rgba(201,168,76,0.1)" },
+              { action:"SCAN",       label:"🔍 DEEP SCAN",  color:"#9B59B6", bg:"rgba(155,89,182,0.1)" },
+            ].map(({action,label,color,bg})=>(
+              <button key={action} className="ai-cmd-btn" onClick={()=>executeCmd(action)} style={{ background:bg, border:`1px solid ${color}40`, color, width:"100%", textAlign:"left" }}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {cmdResult && (
+            <div style={{ padding:"10px 12px", borderRadius:8, border:`1px solid ${cmdResult.ok?"rgba(0,255,136,0.3)":"rgba(255,59,59,0.3)"}`, background:cmdResult.ok?"rgba(0,255,136,0.05)":"rgba(255,59,59,0.05)", fontSize:11, color:cmdResult.ok?"var(--green)":"var(--red)", marginBottom:14, fontFamily:"Share Tech Mono,monospace", lineHeight:1.6 }}>
+              {cmdResult.ok?"✓":"✗"} {cmdResult.msg}
+            </div>
+          )}
+
+          <div style={{ borderTop:"1px solid rgba(255,255,255,0.05)", paddingTop:12 }}>
+            <div style={{ fontFamily:"Orbitron,monospace",fontSize:9,color:"var(--gold)",letterSpacing:1,marginBottom:8 }}>⚠ CRITICAL NODES</div>
+            {critNodes.length===0 ? <div style={{ fontSize:10,color:"var(--dim)" }}>No critical nodes detected</div> :
+            critNodes.map(d=>(
+              <div key={d.id} onClick={()=>setCmdNode(d.id)} style={{ display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:6,border:"1px solid rgba(255,59,59,0.15)",background:"rgba(255,59,59,0.04)",marginBottom:5,cursor:"pointer" }}>
+                <span style={{ width:6,height:6,borderRadius:"50%",background:"var(--red)",flexShrink:0 }} />
+                <span style={{ fontFamily:"Share Tech Mono,monospace",fontSize:10,color:"var(--red)",flex:1 }}>{d.id}</span>
+                <span style={{ fontSize:9,color:"var(--dim)" }}>{d.trustScore}/100</span>
+                <span style={{ fontSize:9,color:"var(--dim)" }}>{d.location?.city}</span>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ borderTop:"1px solid rgba(255,255,255,0.05)", paddingTop:12, marginTop:8 }}>
+            <div style={{ fontFamily:"Orbitron,monospace",fontSize:9,color:"var(--orange)",letterSpacing:1,marginBottom:8 }}>⚠ SUSPICIOUS NODES</div>
+            {susNodes.map(d=>(
+              <div key={d.id} onClick={()=>setCmdNode(d.id)} style={{ display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:6,border:"1px solid rgba(255,140,0,0.15)",background:"rgba(255,140,0,0.04)",marginBottom:5,cursor:"pointer" }}>
+                <span style={{ width:6,height:6,borderRadius:"50%",background:"var(--orange)",flexShrink:0 }} />
+                <span style={{ fontFamily:"Share Tech Mono,monospace",fontSize:10,color:"var(--orange)",flex:1 }}>{d.id}</span>
+                <span style={{ fontSize:9,color:"var(--dim)" }}>{d.trustScore}/100</span>
+                <span style={{ fontSize:9,color:"var(--dim)" }}>{d.location?.city}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ── PREDICTOR TAB ── */}
+      {tab==="predictor" && (
+        <div style={{ flex:1, overflowY:"auto", padding:"14px" }}>
+          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12 }}>
+            <div style={{ fontFamily:"Orbitron,monospace",fontSize:9,color:"var(--cyan)",letterSpacing:1 }}>AI THREAT PREDICTIONS</div>
+            <button onClick={()=>setPredRefresh(r=>r+1)} style={{ padding:"4px 10px",background:"rgba(0,212,255,0.08)",border:"1px solid rgba(0,212,255,0.2)",borderRadius:6,color:"var(--cyan)",cursor:"pointer",fontFamily:"Orbitron,monospace",fontSize:8 }}>↻ REFRESH</button>
+          </div>
+
+          {/* Overall risk score */}
+          <div style={{ background:"linear-gradient(135deg,rgba(255,59,59,0.08),rgba(13,18,53,0.9))",border:"1px solid rgba(255,59,59,0.2)",borderRadius:10,padding:14,marginBottom:12,textAlign:"center" }}>
+            <div style={{ fontSize:9,color:"var(--dim)",fontFamily:"Share Tech Mono,monospace",marginBottom:6 }}>PREDICTED THREAT LEVEL (NEXT 60 MIN)</div>
+            <div style={{ fontFamily:"Orbitron,monospace",fontSize:42,fontWeight:900,color:"var(--red)" }}>{Math.min(99,Math.floor(threats.filter(t=>t.severity==="Critical"||t.severity==="High").length*1.8+30))}<span style={{ fontSize:18 }}>%</span></div>
+            <div style={{ fontSize:10,color:"var(--red)",marginTop:4 }}>HIGH RISK</div>
+          </div>
+
+          {/* Prediction cards */}
+          {[
+            { icon:"💥", title:"DDoS Surge", conf:Math.floor(75+Math.random()*20), time:"~18 min", color:"#FF3B3B", desc:`${Math.floor(threats.length*1.4+200)} pkts/sec expected. Target: cloud ingress.` },
+            { icon:"👾", title:"Device Spoofing", conf:Math.floor(60+Math.random()*25), time:"~34 min", color:"#FF8C00", desc:`${devices.filter(d=>d.status==="Suspicious").length} suspicious nodes may attempt certificate replay.` },
+            { icon:"🔓", title:"Unauthorized Access", conf:Math.floor(50+Math.random()*30), time:"~47 min", color:"#C9A84C", desc:`Brute-force pattern detected from ${[...new Set(threats.map(t=>t.sourceDevice))].length} unique sources.` },
+            { icon:"📤", title:"Data Exfiltration", conf:Math.floor(40+Math.random()*20), time:"~52 min", color:"#9B59B6", desc:`Anomalous outbound patterns on ${Math.floor(Math.random()*8+3)} nodes. Covert channel suspected.` },
+          ].map((p,i)=>(
+            <div key={i} style={{ border:`1px solid ${p.color}25`,background:`${p.color}08`,borderRadius:10,padding:12,marginBottom:10 }}>
+              <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6 }}>
+                <span style={{ fontSize:18 }}>{p.icon}</span>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontFamily:"Orbitron,monospace",fontSize:10,color:p.color,fontWeight:700 }}>{p.title}</div>
+                  <div style={{ fontSize:9,color:"var(--dim)",fontFamily:"Share Tech Mono,monospace" }}>ETA: {p.time}</div>
+                </div>
+                <div style={{ textAlign:"right" }}>
+                  <div style={{ fontFamily:"Orbitron,monospace",fontSize:16,fontWeight:900,color:p.color }}>{p.conf}%</div>
+                  <div style={{ fontSize:8,color:"var(--dim)" }}>confidence</div>
+                </div>
+              </div>
+              <div style={{ fontSize:10,color:"var(--dim)",lineHeight:1.5,marginBottom:8 }}>{p.desc}</div>
+              <div style={{ height:4,background:"rgba(255,255,255,0.06)",borderRadius:2 }}>
+                <div style={{ height:"100%",width:`${p.conf}%`,background:`linear-gradient(90deg,${p.color}80,${p.color})`,borderRadius:2,transition:"width 0.5s" }} />
+              </div>
+            </div>
+          ))}
+
+          {/* Recommendations */}
+          <div style={{ background:"rgba(0,255,136,0.04)",border:"1px solid rgba(0,255,136,0.15)",borderRadius:10,padding:12 }}>
+            <div style={{ fontFamily:"Orbitron,monospace",fontSize:9,color:"var(--green)",letterSpacing:1,marginBottom:8 }}>✓ AI RECOMMENDATIONS</div>
+            {[
+              `Isolate ${devices.filter(d=>d.trustScore<20).length} nodes with trust < 20`,
+              `Rotate certificates on ${devices.filter(d=>d.status==="Suspicious").length} suspicious nodes`,
+              `Increase sampling rate on ${[...new Set(threats.slice(0,10).map(t=>t.type))][0]||"MITM"} attack vector`,
+              "Enable geo-fencing on new device registrations",
+              "Activate honeypot nodes in Mumbai and Singapore clusters"
+            ].map((r,i)=>(
+              <div key={i} style={{ display:"flex",gap:8,fontSize:10,color:"var(--dim)",padding:"5px 0",borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
+                <span style={{ color:"var(--green)",flexShrink:0 }}>→</span>{r}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
